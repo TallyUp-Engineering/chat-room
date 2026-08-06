@@ -8,7 +8,46 @@ Built in public by [TallyUp Engineering](https://github.com/tallyup-engineering)
 
 > Chat Room uses an original late-1990s desktop messenger-inspired interface.
 
-## What ships in v0.5
+## What ships in v0.6
+
+The room can now **start, reach, answer, and stop** agent work, so the terminal stops being
+the only way in.
+
+- **Start new work from the room.** Choose a worktree, choose Claude or Codex, write the first
+  instruction. `chat-room start`, the `room_session_start` tool, and a card on the Command
+  Console all open one real local CLI session. It bills vendor tokens like any other session.
+- **A tag reaches an idle session.** Previously only a Codex session launched with
+  `chat-room codex` could be woken, so tagging a Claude worker did nothing. Any idle session now
+  receives the tagged message through its vendor CLI. Delivery is deliberately narrow — see
+  *Carrying tags into sessions* below.
+- **Answers find their way home.** A question opened with `session_id` records the session that
+  asked, so the reply routes back to it rather than waiting to be noticed.
+- **Stop a running turn.** The Ctrl-C you give up by not holding a terminal, as a button and as
+  `chat-room stop`.
+- **Unread, not total.** The console badge counts what arrived since you last opened the room log.
+- **Search the whole room**, not just the loaded window — `chat-room search`, `room_search`, or the
+  sidebar box.
+
+### Carrying tags into sessions
+
+A delivered tag starts a vendor CLI turn, which costs vendor tokens. `delivery_policy/wake_on_tag`
+governs it and is an ordinary indexed option:
+
+```sh
+chat-room option-set --namespace delivery_policy --key wake_on_tag --value off
+```
+
+| value | behaviour |
+|---|---|
+| `off` | never carry a tag into a session; the room stays a noticeboard |
+| `direct` | **default** — only a direct `@handle` reaches its session |
+| `all` | a `#worktree` tag also reaches every session in that worktree |
+
+Under every value the room refuses to deliver its own `@chat-room` chatter, to echo a message back
+into the session that sent it, to overlap a turn already running, or to deliver twice inside 60
+seconds. Those four guards are what stop two tagged agents from billing each other in a loop.
+
+### Everything from v0.5 still holds
 
 - One room per Git common directory, shared automatically by linked worktrees.
 - Active `@agent` handles and independent `#worktree` targets.
@@ -26,7 +65,7 @@ Built in public by [TallyUp Engineering](https://github.com/tallyup-engineering)
 - Quiet, grouped chatter suggestions for shared-worktree actors and file overlaps. A small `+` deliberately activates the conversation; there is no alert-card wall.
 - Indexed actor/action routing. `investigate`, `consolidate`, and `delete after proof` are editable key/value options; routing opens a tagged chat and never mutates Git.
 - A loopback-only web UI with WebSocket change signals and bounded reconciliation, plus a normal terminal chat client.
-- Codex lifecycle hooks and an MCP server with twelve room tools.
+- Codex lifecycle hooks and an MCP server with fifteen room tools.
 - Claude Code hook configuration using the same local protocol.
 - Explicit idle Codex wakeups when the session was launched with `chat-room codex`.
 - SQLite state under `~/.chat-room`, mode `0600`, with credential-shape rejection.
@@ -92,6 +131,9 @@ Useful one-shot commands:
 chat-room status
 chat-room targets
 chat-room threads
+chat-room search --query "rebase door"
+chat-room start --client claude --worktree ../lane-one --prompt "rebuild the projection and report"
+chat-room stop --client claude --session <session-id>
 chat-room thread-open --audience human-loop --origin agent-request \
   --title "Choose navigation direction" \
   --reason "design direction" --lifetime durable \

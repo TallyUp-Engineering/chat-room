@@ -13,7 +13,8 @@
         <details class="nav-section" open>
           <summary><span>Command Console</span><em id="combined-count">0</em></summary>
           <div id="active-agents" class="active-agents"><p class="nav-empty">Looking for active agents…</p></div>
-          <button id="combined-room" class="conversation active"><span class="conversation-icon">◎</span><span><b>Command Console</b><small>All project activity · read</small></span></button>
+          <button id="combined-room" class="conversation active"><span class="conversation-icon">◎</span><span><b>Command Console</b><small>All project activity · read</small></span><em id="unread-count" class="unread" hidden></em></button>
+          <form id="search-form" class="room-search"><input id="search-input" type="search" placeholder="Search this room…" aria-label="Search this room"><button type="submit">Go</button></form>
         </details>
 
         <details class="nav-section human-loop" open>
@@ -56,7 +57,7 @@
         <p class="authority"><b>Room ≠ authority.</b><br>Git and provider state remain authoritative.</p>
       </aside>
       <section id="chat-pane" class="chat">
-        <header><div><b id="view-title">Command Console</b><small id="identity">local Git project · all activity</small></div><div class="view-actions"><button id="rename-view" type="button">Rename</button><button id="close-thread" type="button" hidden>Resolve</button><span id="view-status" class="connected">● connected locally</span></div></header>
+        <header><div><b id="view-title">Command Console</b><small id="identity">local Git project · all activity</small></div><div class="view-actions"><button id="rename-view" type="button">Rename</button><button id="stop-turn" type="button" hidden>Stop turn</button><button id="close-thread" type="button" hidden>Resolve</button><span id="view-status" class="connected">● connected locally</span></div></header>
         <div id="messages" class="messages"><p class="notice">Preparing the local command console…</p></div>
         <p id="error" class="error" hidden></p>
         <form id="composer" hidden><div class="tools"><b>B</b>　<i>I</i>　 @　 #　 <button id="attach-image" type="button" title="Attach images" aria-label="Attach images">📎</button><input id="image-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden><span id="room-routing"><select id="send-scope" aria-label="Message route"><option value="channel">Console</option><option value="all">All active</option><option value="tag">Tag worker</option></select><select id="send-target" aria-label="Worker to tag" hidden></select></span><span id="compose-label">message as @human · route to all or tag one worker</span></div><div id="attachments" class="attachments" hidden></div><div class="compose"><textarea id="message" maxlength="4000" placeholder="Message the command console. Tag an active @actor or #worktree."></textarea><button id="send-message">Send</button></div></form>

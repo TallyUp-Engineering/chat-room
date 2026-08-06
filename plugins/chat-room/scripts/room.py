@@ -35,8 +35,8 @@ from urllib.request import Request, urlopen
 
 
 PLUGIN_NAME = "chat-room"
-VERSION = "0.5.1"
-SCHEMA_VERSION = 5
+VERSION = "0.6.0"
+SCHEMA_VERSION = 6
 ACTIVE_WINDOW_SECONDS = 30 * 60
 WAKE_ENDPOINT_ENV = "CHAT_ROOM_WAKE_ENDPOINT"
 CLIENT_ENV = "CHAT_ROOM_CLIENT"
@@ -69,6 +69,8 @@ MAX_CHAT_IMAGES = 5
 IMAGE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif"}
 CONFLICT_SCAN_TTL_SECONDS = 30
 MAX_CONFLICT_PROBES = 40
+# One tag must not be able to bill a vendor turn on a loop.
+WAKE_COOLDOWN_SECONDS = 60
 # ponytail: the browser re-fetches this on every change signal, so it is a window, not
 # the archive. Raise it, or page the room log, if a room ever needs deeper scrollback.
 SNAPSHOT_MESSAGE_LIMIT = 300
@@ -689,6 +691,90 @@ def cleanup_chat_images(paths: Sequence[Path]) -> None:
         except OSError: pass
 
 
+def spawn_cli_turn(data_dir: Path, client: str, worktree: Path, body: str, session_id: Optional[str] = None, images: Sequence[Path] = ()) -> Dict[str, Any]:
+    """Run one local CLI turn: resume `session_id`, or start a new session when it is None.
+
+    The prompt always travels on stdin, never in process arguments, so it stays out of the
+    process table. Ordinary vendor configuration and sandbox rules still apply.
+    """
+    normalized = client.strip().lower()
+    executable = find_cli_executable(normalized if normalized in ("codex", "claude") else "")
+    if not executable:
+        raise RoomError(f"the {client} CLI is not installed on this machine")
+    if normalized == "codex":
+        command = [executable, "exec"] + (["resume", "--all"] if session_id else [])
+        for path in images:
+            command.extend(["--image", str(path)])
+        if session_id:
+            command.append(session_id)
+        command.append("-")
+    elif normalized == "claude":
+        command = [executable, "--print"] + (["--resume", session_id] if session_id else [])
+        if images:
+            body += "\n\nAttached local image files:\n" + "\n".join(f"- {path}" for path in images) + "\nUse these images as part of the request."
+    else:
+        raise RoomError("unsupported chat client")
+    logs = data_dir / "chat-deliveries"
+    logs.mkdir(parents=True, exist_ok=True)
+    log_path = logs / f"{normalized}-{slug(session_id or 'new-session', 'session')}.log"
+    environment = os.environ.copy()
+    environment[CLIENT_ENV] = normalized
+    handle = open(log_path, "ab", buffering=0)
+    try:
+        process = subprocess.Popen(command, cwd=str(worktree), env=environment, stdin=subprocess.PIPE, stdout=handle, stderr=subprocess.STDOUT, start_new_session=True)
+        if process.stdin is None:
+            raise RoomError("CLI delivery stdin is unavailable")
+        process.stdin.write((body + "\n").encode())
+        process.stdin.close()
+    finally:
+        handle.close()
+    return {"process": process, "log": str(log_path), "client": normalized}
+
+
+def track_delivery(client: str, key: str, process: "subprocess.Popen[bytes]", images: Sequence[Path] = ()) -> None:
+    with CHAT_DELIVERY_LOCK:
+        CHAT_DELIVERIES[(client, key)] = {"process": process, "attachments": [str(path) for path in images], "started_at": time.monotonic()}
+
+
+def running_delivery(client: str, key: str) -> bool:
+    with CHAT_DELIVERY_LOCK:
+        delivery = CHAT_DELIVERIES.get((client, key))
+        process = delivery.get("process") if delivery else None
+    return bool(process and process.poll() is None)
+
+
+def stop_delivery(client: str, session_id: str) -> Dict[str, Any]:
+    """Interrupt the local turn this room started — the Ctrl-C you give up by not holding a terminal."""
+    with CHAT_DELIVERY_LOCK:
+        delivery = CHAT_DELIVERIES.get((client.strip().lower(), session_id))
+        process = delivery.get("process") if delivery else None
+    if process is None or process.poll() is not None:
+        raise RoomError("this room is not running a local turn for that session")
+    process.terminate()
+    try:
+        process.wait(5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+    return {"status": "stopped", "client": client.strip().lower(), "session_id": session_id}
+
+
+def start_session(data_dir: Path, repo: Repository, client: str, worktree_value: Optional[str], prompt: str) -> Dict[str, Any]:
+    """Open new agent work in a chosen worktree without a terminal."""
+    body = ensure_value_free(prompt)
+    normalized = client.strip().lower()
+    if normalized not in ("codex", "claude"):
+        raise RoomError("agent client must be codex or claude")
+    worktree = Path(worktree_value).expanduser().resolve() if worktree_value else repo.worktree
+    if not worktree.is_dir():
+        raise RoomError("worktree path does not exist")
+    if not path_belongs_to_room(worktree, repo, {}):
+        raise RoomError("worktree does not belong to this project")
+    started = spawn_cli_turn(data_dir, normalized, worktree, body)
+    process = started["process"]
+    track_delivery(normalized, f"new:{process.pid}", process)
+    return {"status": "started", "client": normalized, "worktree": str(worktree), "worktree_target": worktree_target(worktree), "pid": process.pid, "log": started["log"]}
+
+
 def start_chat_delivery(data_dir: Path, repo: Repository, client: str, session_id: str, message: str, members: Sequence[Dict[str, Any]], attachments: Sequence[Dict[str, Any]] = ()) -> Dict[str, Any]:
     if not str(message).strip() and not attachments:
         raise RoomError("chat turn must include text or an image")
@@ -710,41 +796,17 @@ def start_chat_delivery(data_dir: Path, repo: Repository, client: str, session_i
         threading.Timer(300, cleanup_chat_images, args=(images,)).start()
         return {"status": "sent", "mode": "live", "session_id": session_id}
     normalized = str(summary["client"]).lower()
-    executable = find_cli_executable("codex" if normalized == "codex" else "claude" if normalized == "claude" else "")
-    if not executable:
-        cleanup_chat_images(images)
-        raise RoomError(f"{summary['client']} CLI is not installed")
-    if normalized == "codex":
-        command = [executable, "exec", "resume", "--all"]
-        for path in images: command.extend(["--image", str(path)])
-        command.extend([session_id, "-"])
-    elif normalized == "claude":
-        command = [executable, "--resume", session_id, "--print"]
-        if images:
-            body += "\n\nAttached local image files:\n" + "\n".join(f"- {path}" for path in images) + "\nUse these images as part of the request."
-    else:
-        cleanup_chat_images(images)
-        raise RoomError("unsupported chat client")
     worktree = Path(str(summary.get("cwd") or repo.worktree)).expanduser().resolve()
     if not path_belongs_to_room(worktree, repo, {}):
         cleanup_chat_images(images)
         raise RoomError("chat worktree no longer belongs to this project")
-    logs = data_dir / "chat-deliveries"; logs.mkdir(parents=True, exist_ok=True)
-    log_path = logs / f"{normalized}-{slug(session_id, 'session')}.log"
-    environment = os.environ.copy(); environment[CLIENT_ENV] = normalized
-    handle = open(log_path, "ab", buffering=0)
     try:
-        process = subprocess.Popen(command, cwd=str(worktree), env=environment, stdin=subprocess.PIPE, stdout=handle, stderr=subprocess.STDOUT, start_new_session=True)
-        if process.stdin is None:
-            raise RoomError("CLI delivery stdin is unavailable")
-        process.stdin.write((body + "\n").encode()); process.stdin.close()
+        started = spawn_cli_turn(data_dir, normalized, worktree, body, session_id, images)
     except Exception:
-        handle.close()
         cleanup_chat_images(images)
         raise
-    handle.close()
-    with CHAT_DELIVERY_LOCK:
-        CHAT_DELIVERIES[(normalized, session_id)] = {"process": process, "attachments": [str(path) for path in images]}
+    process = started["process"]
+    track_delivery(normalized, session_id, process, images)
     return {"status": "started", "mode": "resume", "session_id": session_id, "pid": process.pid, "images": len(images)}
 
 
@@ -776,7 +838,8 @@ class RoomStore:
         CREATE TABLE IF NOT EXISTS rooms(room_id TEXT PRIMARY KEY,project_identity TEXT NOT NULL,common_dir TEXT NOT NULL,repository_root TEXT NOT NULL,created_at TEXT NOT NULL,last_seen_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT,room_id TEXT NOT NULL,timestamp TEXT NOT NULL,session_id TEXT,sender TEXT NOT NULL,recipients_json TEXT NOT NULL,kind TEXT NOT NULL,topic TEXT NOT NULL,status TEXT NOT NULL,message TEXT NOT NULL,cwd TEXT,worktree TEXT,branch TEXT,head TEXT,metadata_json TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS messages_room_id_id ON messages(room_id,id);
-        CREATE TABLE IF NOT EXISTS presence(room_id TEXT NOT NULL,participant_id TEXT NOT NULL,session_id TEXT,agent_id TEXT,role TEXT NOT NULL,state TEXT NOT NULL,cwd TEXT NOT NULL,worktree TEXT NOT NULL,branch TEXT,head TEXT,started_at TEXT NOT NULL,seen_at TEXT NOT NULL,last_event TEXT NOT NULL,handle TEXT,wake_endpoint TEXT,claimed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(room_id,participant_id));
+        CREATE TABLE IF NOT EXISTS presence(room_id TEXT NOT NULL,participant_id TEXT NOT NULL,session_id TEXT,agent_id TEXT,role TEXT NOT NULL,state TEXT NOT NULL,cwd TEXT NOT NULL,worktree TEXT NOT NULL,branch TEXT,head TEXT,started_at TEXT NOT NULL,seen_at TEXT NOT NULL,last_event TEXT NOT NULL,handle TEXT,wake_endpoint TEXT,PRIMARY KEY(room_id,participant_id));
+        CREATE TABLE IF NOT EXISTS handle_claims(room_id TEXT NOT NULL,participant_id TEXT NOT NULL,claimed_at TEXT NOT NULL,PRIMARY KEY(room_id,participant_id));
         CREATE TABLE IF NOT EXISTS cursors(room_id TEXT NOT NULL,participant_id TEXT NOT NULL,last_message_id INTEGER NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(room_id,participant_id));
         CREATE TABLE IF NOT EXISTS threads(id TEXT PRIMARY KEY,room_id TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,status TEXT NOT NULL,title TEXT NOT NULL,reason TEXT NOT NULL,opener TEXT NOT NULL,participants_json TEXT NOT NULL,paths_json TEXT NOT NULL,source TEXT NOT NULL,metadata_json TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS threads_room_status_updated ON threads(room_id,status,updated_at DESC);
@@ -787,23 +850,32 @@ class RoomStore:
             ("worktree_action", "consolidate", "Consolidate", {"order": 20, "prompt": "Compare the referenced work against current authority, identify the smallest consumer-closed consolidation, and report the exact safe sequence before changing Git."}),
             ("worktree_action", "delete", "Delete after proof", {"order": 30, "prompt": "Prove the referenced work has no unique reachable value and report a recoverable deletion plan. Do not delete until the human explicitly approves the exact targets."}),
             ("notification_policy", "stale_worktree_days", "30", {"label": "Potentially stale after days"}),
+            ("delivery_policy", "wake_on_tag", "direct", {"label": "Carry tags into idle sessions", "choices": "off, direct, all"}),
         )
-        self.connection.executemany("INSERT OR IGNORE INTO option_index VALUES(?,?,?,?)", [(namespace, key, value, json.dumps(metadata, sort_keys=True)) for namespace, key, value, metadata in defaults])
+        self.connection.executemany("INSERT OR IGNORE INTO option_index(namespace,key,value,metadata_json) VALUES(?,?,?,?)", [(namespace, key, value, json.dumps(metadata, sort_keys=True)) for namespace, key, value, metadata in defaults])
         row = self.connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
         installed = int(str(row["value"])) if row and str(row["value"]).isdigit() else 0
         if installed < 5:
-            try:
-                self.connection.execute("ALTER TABLE presence ADD COLUMN claimed INTEGER NOT NULL DEFAULT 0")
-            except sqlite3.OperationalError:
-                pass
             # Schema 4 seeded 2 days, contradicting the documented and displayed 30.
             self.connection.execute("UPDATE option_index SET value='30' WHERE namespace='notification_policy' AND key='stale_worktree_days' AND value='2'")
-        self.connection.execute("INSERT OR REPLACE INTO metadata VALUES('schema_version',?)", (str(SCHEMA_VERSION),))
+        # A 0.6 pre-release widened presence in place. Every other version of this script on
+        # the machine still writes it positionally, so the extra column broke their hooks the
+        # moment they touched the shared database. Narrow it back and keep claims beside it.
+        if any(str(row["name"]) == "claimed" for row in self.connection.execute("PRAGMA table_info(presence)")):
+            self.connection.execute(
+                "INSERT OR IGNORE INTO handle_claims(room_id,participant_id,claimed_at)"
+                " SELECT room_id,participant_id,seen_at FROM presence WHERE claimed=1"
+            )
+            try:
+                self.connection.execute("ALTER TABLE presence DROP COLUMN claimed")
+            except sqlite3.OperationalError:
+                pass
+        self.connection.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('schema_version',?)", (str(SCHEMA_VERSION),))
         self.connection.commit()
 
     def register_room(self, repo: Repository) -> None:
         now = utc_now()
-        self.connection.execute("""INSERT INTO rooms VALUES(?,?,?,?,?,?) ON CONFLICT(room_id) DO UPDATE SET project_identity=excluded.project_identity,common_dir=excluded.common_dir,repository_root=excluded.repository_root,last_seen_at=excluded.last_seen_at""", (repo.room_id, repo.project_identity, str(repo.common_dir), str(repo.worktree), now, now))
+        self.connection.execute("""INSERT INTO rooms(room_id,project_identity,common_dir,repository_root,created_at,last_seen_at) VALUES(?,?,?,?,?,?) ON CONFLICT(room_id) DO UPDATE SET project_identity=excluded.project_identity,common_dir=excluded.common_dir,repository_root=excluded.repository_root,last_seen_at=excluded.last_seen_at""", (repo.room_id, repo.project_identity, str(repo.common_dir), str(repo.worktree), now, now))
         self.connection.commit()
 
     def options(self) -> Dict[str, List[Dict[str, Any]]]:
@@ -825,7 +897,7 @@ class RoomStore:
         clean_value = concise(ensure_value_free(value), 160)
         metadata_json = json.dumps(metadata or {}, sort_keys=True)
         ensure_value_free(metadata_json)
-        self.connection.execute("INSERT INTO option_index VALUES(?,?,?,?) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value,metadata_json=excluded.metadata_json", (clean_namespace, clean_key, clean_value, metadata_json))
+        self.connection.execute("INSERT INTO option_index(namespace,key,value,metadata_json) VALUES(?,?,?,?) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value,metadata_json=excluded.metadata_json", (clean_namespace, clean_key, clean_value, metadata_json))
         self.connection.commit()
         return self.option(clean_namespace, clean_key)
 
@@ -877,16 +949,16 @@ class RoomStore:
     def upsert_presence(self, repo: Repository, participant_id: str, session_id: Optional[str], agent_id: Optional[str], role: str, state: str, event: str, wake_endpoint: Optional[str] = None) -> None:
         self.register_room(repo)
         now = utc_now()
-        previous = self.connection.execute("SELECT handle,started_at,claimed FROM presence WHERE room_id=? AND participant_id=?", (repo.room_id, participant_id)).fetchone()
-        claimed = bool(previous and previous["claimed"])
-        if claimed:
+        previous = self.connection.execute("SELECT handle,started_at FROM presence WHERE room_id=? AND participant_id=?", (repo.room_id, participant_id)).fetchone()
+        claimed = self.connection.execute("SELECT 1 FROM handle_claims WHERE room_id=? AND participant_id=?", (repo.room_id, participant_id)).fetchone() is not None
+        if claimed and previous and previous["handle"]:
             handle = str(previous["handle"])
         else:
             # A generated handle follows its role, so a session that moves worktree stops
             # advertising the old one. Uniqueness is settled here, never at read time.
             handle = self.unique_handle(repo.room_id, participant_id, slug(role.replace(":", "-"), "agent"))
         started = str(previous["started_at"]) if previous else now
-        self.connection.execute("""INSERT INTO presence VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(room_id,participant_id) DO UPDATE SET session_id=excluded.session_id,agent_id=excluded.agent_id,role=excluded.role,state=excluded.state,cwd=excluded.cwd,worktree=excluded.worktree,branch=excluded.branch,head=excluded.head,seen_at=excluded.seen_at,last_event=excluded.last_event,handle=excluded.handle,wake_endpoint=excluded.wake_endpoint""", (repo.room_id, participant_id, session_id, agent_id, role, state, str(repo.cwd), str(repo.worktree), repo.branch, repo.head, started, now, event, handle, wake_endpoint, int(claimed)))
+        self.connection.execute("""INSERT INTO presence(room_id,participant_id,session_id,agent_id,role,state,cwd,worktree,branch,head,started_at,seen_at,last_event,handle,wake_endpoint) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(room_id,participant_id) DO UPDATE SET session_id=excluded.session_id,agent_id=excluded.agent_id,role=excluded.role,state=excluded.state,cwd=excluded.cwd,worktree=excluded.worktree,branch=excluded.branch,head=excluded.head,seen_at=excluded.seen_at,last_event=excluded.last_event,handle=excluded.handle,wake_endpoint=excluded.wake_endpoint""", (repo.room_id, participant_id, session_id, agent_id, role, state, str(repo.cwd), str(repo.worktree), repo.branch, repo.head, started, now, event, handle, wake_endpoint))
         self.connection.execute("DELETE FROM presence WHERE room_id=? AND state='offline' AND seen_at<?", (repo.room_id, (datetime.now(timezone.utc) - timedelta(days=1)).replace(microsecond=0).isoformat().replace("+00:00", "Z")))
         self.connection.commit()
 
@@ -909,7 +981,8 @@ class RoomStore:
         matches = [m for m in active if str(m.get("session_id") or "").startswith(session_ref) or str(m["participant_id"]).startswith(session_ref)]
         if len(matches) != 1: raise RoomError("session reference must match exactly one active session")
         if any(m["target"] == "@" + handle and m["participant_id"] != matches[0]["participant_id"] for m in active): raise RoomError(f"@{handle} is already active")
-        self.connection.execute("UPDATE presence SET handle=?,claimed=1,seen_at=? WHERE room_id=? AND participant_id=?", (handle, utc_now(), repo.room_id, matches[0]["participant_id"]))
+        self.connection.execute("UPDATE presence SET handle=?,seen_at=? WHERE room_id=? AND participant_id=?", (handle, utc_now(), repo.room_id, matches[0]["participant_id"]))
+        self.connection.execute("INSERT OR REPLACE INTO handle_claims(room_id,participant_id,claimed_at) VALUES(?,?,?)", (repo.room_id, matches[0]["participant_id"], utc_now()))
         self.connection.commit()
         return next(m for m in self.members(repo.room_id) if m["participant_id"] == matches[0]["participant_id"])
 
@@ -973,7 +1046,7 @@ class RoomStore:
         now = utc_now()
         identifier = thread_id or "thread-" + hashlib.sha256(os.urandom(32)).hexdigest()[:12]
         self.connection.execute(
-            """INSERT INTO threads VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+            """INSERT INTO threads(id,room_id,created_at,updated_at,status,title,reason,opener,participants_json,paths_json,source,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at,status='open',title=excluded.title,reason=excluded.reason,participants_json=excluded.participants_json,paths_json=excluded.paths_json,metadata_json=excluded.metadata_json""",
             (identifier, repo.room_id, now, now, "open", heading, why, concise(opener, 100), json.dumps(targets), json.dumps(clean_paths), source, json.dumps(thread_metadata, sort_keys=True)),
         )
@@ -1055,7 +1128,7 @@ class RoomStore:
         cursor = self.connection.execute("""INSERT INTO messages(room_id,timestamp,session_id,sender,recipients_json,kind,topic,status,message,cwd,worktree,branch,head,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (repo.room_id, now, session_id, sender[:100], json.dumps(resolved), kind, topic[:120], status[:160], body, str(repo.cwd), str(repo.worktree), repo.branch, repo.head, json.dumps(metadata or {}, sort_keys=True)))
         self.connection.commit()
         posted = self.message(int(cursor.lastrowid))
-        posted["wake"] = self.dispatch_wakes(repo, posted)
+        posted["wake"] = self.dispatch_wakes(repo, posted, self.data_dir)
         return posted
 
     def message(self, message_id: int) -> Dict[str, Any]:
@@ -1068,12 +1141,25 @@ class RoomStore:
         return int(row["last_message_id"]) if row else 0
 
     def advance_cursor(self, room_id: str, participant_id: str, message_id: int) -> None:
-        self.connection.execute("INSERT INTO cursors VALUES(?,?,?,?) ON CONFLICT(room_id,participant_id) DO UPDATE SET last_message_id=excluded.last_message_id,updated_at=excluded.updated_at", (room_id, participant_id, int(message_id), utc_now()))
+        self.connection.execute("INSERT INTO cursors(room_id,participant_id,last_message_id,updated_at) VALUES(?,?,?,?) ON CONFLICT(room_id,participant_id) DO UPDATE SET last_message_id=excluded.last_message_id,updated_at=excluded.updated_at", (room_id, participant_id, int(message_id), utc_now()))
         self.connection.commit()
 
     def read(self, room_id: str, after_id: int = 0, limit: int = 50) -> List[Dict[str, Any]]:
         rows = self.connection.execute("SELECT * FROM messages WHERE room_id=? AND id>? ORDER BY id ASC LIMIT ?", (room_id, max(0, int(after_id)), max(1, min(100, int(limit))))).fetchall()
         return [message_from_row(row) for row in rows]
+
+    def search(self, room_id: str, query: str, limit: int = 100) -> List[Dict[str, Any]]:
+        """Reach a message the snapshot window no longer carries, without dropping to grep."""
+        text = query.strip()
+        if not text:
+            return []
+        pattern = "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        rows = self.connection.execute(
+            "SELECT * FROM messages WHERE room_id=? AND (message LIKE ? ESCAPE '\\' OR sender LIKE ? ESCAPE '\\' OR topic LIKE ? ESCAPE '\\')"
+            " ORDER BY id DESC LIMIT ?",
+            (room_id, pattern, pattern, pattern, max(1, min(200, int(limit)))),
+        ).fetchall()
+        return [message_from_row(row) for row in reversed(rows)]
 
     def recent(self, room_id: str, limit: int = 30) -> List[Dict[str, Any]]:
         rows = self.connection.execute("SELECT * FROM messages WHERE room_id=? ORDER BY id DESC LIMIT ?", (room_id, max(1, min(2000, int(limit))))).fetchall()
@@ -1084,15 +1170,48 @@ class RoomStore:
         last = self.connection.execute("SELECT COALESCE(MAX(id),0) value FROM messages WHERE room_id=?", (repo.room_id,)).fetchone()["value"]
         return {"room_id": repo.room_id, "project_identity": repo.project_identity, "common_dir": str(repo.common_dir), "worktree": str(repo.worktree), "branch": repo.branch, "head": repo.head, "members_total": len(members), "members_online": sum(m["state"] == "online" for m in members), "members_idle": sum(m["state"] == "idle" for m in members), "last_message_id": int(last), "authority": "advisory-only"}
 
-    def dispatch_wakes(self, repo: Repository, message: Dict[str, Any]) -> Dict[str, Any]:
-        recipients = set(message["recipients"]); result: Dict[str, Any] = {"attempted": 0, "started": [], "failed": []}
+    def dispatch_wakes(self, repo: Repository, message: Dict[str, Any], data_dir: Optional[Path] = None) -> Dict[str, Any]:
+        """Carry a tagged message into the addressed session instead of waiting for it to look.
+
+        A live Codex app-server connection takes the message directly; every other idle
+        session gets one vendor CLI turn. That turn costs vendor tokens, so delivery is
+        deliberately narrow: only a direct @handle by default, never system chatter, never
+        the sender's own session, and never twice inside the cooldown.
+        """
+        policy = self.display_name("delivery_policy", "wake_on_tag", "direct")
+        result: Dict[str, Any] = {"attempted": 0, "started": [], "failed": [], "policy": policy}
+        recipients = set(message["recipients"])
+        if policy == "off" or not recipients or str(message.get("sender") or "") == "@chat-room":
+            return result
         for member in self.members(repo.room_id):
-            if not member.get("wakeable_idle") or not recipients.intersection({member["target"], member["worktree_target"]}): continue
-            if message.get("session_id") == member.get("session_id"): continue
+            if member["state"] == "offline":
+                continue
+            addressed = {member["target"]} if policy != "all" else {member["target"], member["worktree_target"]}
+            if not recipients.intersection(addressed):
+                continue
+            session_id = str(member.get("session_id") or "")
+            client = str(member.get("role") or "").split(":")[0]
+            if not session_id or client not in ("codex", "claude"):
+                continue
+            if message.get("session_id") == session_id or running_delivery(client, session_id):
+                continue
+            with CHAT_DELIVERY_LOCK:
+                previous = CHAT_DELIVERIES.get((client, session_id), {})
+                recent = time.monotonic() - float(previous.get("started_at") or 0) < WAKE_COOLDOWN_SECONDS
+            if recent:
+                continue
             result["attempted"] += 1
+            body = f"{WAKE_PROMPT}\n\nFrom {message.get('sender')} in Chat Room: {message.get('message')}"
             try:
-                wake_codex(str(member["wake_endpoint"]), str(member["session_id"])); result["started"].append(member["target"])
-            except RoomError as error:
+                if member.get("wakeable_idle"):
+                    wake_codex(str(member["wake_endpoint"]), session_id, body)
+                elif data_dir is not None:
+                    started = spawn_cli_turn(data_dir, client, Path(str(member["worktree"])), body, session_id)
+                    track_delivery(client, session_id, started["process"])
+                else:
+                    continue
+                result["started"].append(member["target"])
+            except (RoomError, OSError) as error:
                 result["failed"].append({"target": member["target"], "reason": str(error)[:240]})
         return result
 
@@ -1169,10 +1288,13 @@ def tool_definitions() -> List[Dict[str, Any]]:
         {"name": "room_options", "description": "List the indexed notification actions and policy options used by Chat Room.", "inputSchema": {"type": "object", "properties": {"cwd": cwd}}},
         {"name": "room_option_set", "description": "Add or update one machine-local indexed option without rebuilding the UI.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "namespace": {"type": "string"}, "key": {"type": "string"}, "value": {"type": "string"}, "metadata": {"type": "object"}}, "required": ["namespace", "key", "value"]}},
         {"name": "room_threads", "description": "List open manual and preemptive-conflict coordination threads.", "inputSchema": {"type": "object", "properties": {"cwd": cwd}}},
-        {"name": "room_thread_open", "description": "Open agent-only chatter or a human-in-the-loop question with a durable reason and origin.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "title": {"type": "string"}, "reason": {"type": "string"}, "audience": {"type": "string", "enum": ["agents", "human-loop"]}, "origin": {"type": "string"}, "lifetime": {"type": "string", "enum": ["durable", "temporary"]}, "participants": {"type": "array", "items": {"type": "string"}}, "paths": {"type": "array", "items": {"type": "string"}}}, "required": ["title", "reason"]}},
+        {"name": "room_thread_open", "description": "Open agent-only chatter or a human-in-the-loop question with a durable reason and origin.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "title": {"type": "string"}, "reason": {"type": "string"}, "audience": {"type": "string", "enum": ["agents", "human-loop"]}, "origin": {"type": "string"}, "lifetime": {"type": "string", "enum": ["durable", "temporary"]}, "session_id": {"type": "string", "description": "Your session id, so an answer can be carried back to you."}, "participants": {"type": "array", "items": {"type": "string"}}, "paths": {"type": "array", "items": {"type": "string"}}}, "required": ["title", "reason"]}},
         {"name": "room_thread_close", "description": "Mark a coordination thread resolved without changing Git state.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "thread_id": {"type": "string"}}, "required": ["thread_id"]}},
         {"name": "room_identify", "description": "Assign an active session a semantic @handle.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "session_id": {"type": "string"}, "handle": {"type": "string"}}, "required": ["session_id", "handle"]}},
         {"name": "room_post", "description": "Post one value-free coordination message. Use thread_id for central routing, or tag active @handles and #worktrees ad hoc.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "sender": {"type": "string"}, "session_id": {"type": "string"}, "thread_id": {"type": "string"}, "recipients": {"type": "array", "items": {"type": "string"}}, "kind": {"type": "string", "enum": list(MESSAGE_KINDS)}, "topic": {"type": "string"}, "status": {"type": "string"}, "message": {"type": "string", "maxLength": 4000}}, "required": ["kind", "topic", "message"]}},
+        {"name": "room_session_start", "description": "Open new agent work in a worktree of this project. Starts one local vendor CLI session; that session bills vendor tokens.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "client": {"type": "string", "enum": ["claude", "codex"]}, "worktree": {"type": "string", "description": "Absolute worktree path; defaults to the current one."}, "prompt": {"type": "string", "maxLength": 4000}}, "required": ["client", "prompt"]}},
+        {"name": "room_session_stop", "description": "Interrupt a local turn this room started for a session.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "client": {"type": "string", "enum": ["claude", "codex"]}, "session_id": {"type": "string"}}, "required": ["client", "session_id"]}},
+        {"name": "room_search", "description": "Search this room's message history beyond the recent window.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}}, "required": ["query"]}},
         {"name": "room_handoff", "description": "Post a structured handoff with source, paths, proof, blocker, and next owner.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "sender": {"type": "string"}, "session_id": {"type": "string"}, "topic": {"type": "string"}, "source_sha": {"type": "string"}, "paths": {"type": "array", "items": {"type": "string"}}, "proof": {"type": "string"}, "blocker": {"type": "string"}, "next_owner": {"type": "string"}}, "required": ["topic", "source_sha", "paths", "proof", "next_owner"]}},
     ]
 
@@ -1189,13 +1311,23 @@ def execute_tool(store: RoomStore, name: str, args: Dict[str, Any]) -> Any:
     if name == "room_thread_open":
         source = "temporary-channel" if str(args.get("lifetime") or "durable") == "temporary" else "team-channel"
         opener = str(args.get("opener") or f"{client_name()}-session")
-        return store.open_thread(repo, str(args["title"]), str(args["reason"]), opener, [str(x) for x in args.get("participants", [])], [str(x) for x in args.get("paths", [])], source, metadata={"audience": str(args.get("audience") or "agents"), "origin": str(args.get("origin") or opener)})
+        metadata = {"audience": str(args.get("audience") or "agents"), "origin": str(args.get("origin") or opener)}
+        if args.get("session_id"):
+            metadata["origin_session"] = str(args["session_id"])
+            metadata["origin_client"] = client_name()
+        return store.open_thread(repo, str(args["title"]), str(args["reason"]), opener, [str(x) for x in args.get("participants", [])], [str(x) for x in args.get("paths", [])], source, metadata=metadata)
     if name == "room_thread_close": return store.close_thread(repo, str(args["thread_id"]))
     if name == "room_identify": return store.claim_handle(repo, str(args["session_id"]), str(args["handle"]))
     if name == "room_post":
         sender = str(args.get("sender") or f"{client_name()}-session"); session_id = str(args.get("session_id") or "") or None
         if args.get("thread_id"): return store.post_thread(repo, str(args["thread_id"]), sender, str(args["message"]), session_id)
         return store.post(repo, sender, str(args["kind"]), str(args["topic"]), str(args.get("status") or "posted"), str(args["message"]), [str(x) for x in args.get("recipients", [])], session_id)
+    if name == "room_session_start":
+        return start_session(store.data_dir, repo, str(args["client"]), str(args.get("worktree") or ""), str(args["prompt"]))
+    if name == "room_session_stop":
+        return stop_delivery(str(args["client"]), str(args["session_id"]))
+    if name == "room_search":
+        return {"room_id": repo.room_id, "messages": store.search(repo.room_id, str(args["query"]), int(args.get("limit", 100)))}
     if name == "room_handoff":
         paths = [str(x) for x in args.get("paths", [])]
         body = f"source={args['source_sha']}; paths={','.join(paths)}; proof={args['proof']}; blocker={args.get('blocker') or 'none'}; next_owner={args['next_owner']}"
@@ -1226,7 +1358,7 @@ def run_mcp(data_dir: Path) -> int:
 
 
 class RoomHandler(BaseHTTPRequestHandler):
-    server_version = "ChatRoom/0.1"
+    server_version = "ChatRoom/0.6"
     def log_message(self, *_args: Any) -> None: return
     @property
     def app(self) -> "RoomHTTPServer": return self.server  # type: ignore[return-value]
@@ -1255,6 +1387,12 @@ class RoomHandler(BaseHTTPRequestHandler):
                 status = store.status(self.app.repo)
                 status["display_name"] = store.display_name("room_name", self.app.repo.room_id, self.app.repo.worktree.name or "Chat Room")
                 self.send_json({"status": status, "messages": store.recent(self.app.repo.room_id, SNAPSHOT_MESSAGE_LIMIT), "targets": targets, "threads": threads, "alerts": coordination_alerts(targets, threads, options), "options": options, "events_url": f"ws://{self.app.hostname}:{self.app.events_port}/events"})
+            return
+        if path == "/api/search":
+            if not self.authorized(): self.send_json({"error": "invalid local token"}, 403); return
+            query = parse_qs(parsed.query)
+            with RoomStore(self.app.data_dir) as store:
+                self.send_json({"messages": store.search(self.app.repo.room_id, str(query.get("q", [""])[0]))})
             return
         if path == "/api/chats":
             if not self.authorized(): self.send_json({"error": "invalid local token"}, 403); return
@@ -1287,7 +1425,7 @@ class RoomHandler(BaseHTTPRequestHandler):
         if not self.valid_host(): self.send_error(HTTPStatus.MISDIRECTED_REQUEST); return
         if not self.authorized(): self.send_json({"error": "invalid local token"}, 403); return
         path = urlparse(self.path).path
-        if path not in ("/api/messages", "/api/threads", "/api/thread-close", "/api/chat-send", "/api/route-alert", "/api/rename"): self.send_error(404); return
+        if path not in ("/api/messages", "/api/threads", "/api/thread-close", "/api/chat-send", "/api/route-alert", "/api/rename", "/api/session-start", "/api/session-stop"): self.send_error(404); return
         try:
             declared = int(self.headers.get("Content-Length", "0"))
             maximum = MAX_CHAT_IMAGE_BYTES * MAX_CHAT_IMAGES * 2 if path == "/api/chat-send" else 16384
@@ -1295,7 +1433,11 @@ class RoomHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "request body exceeds the local Chat Room limit"}, 413); return
             body = json.loads(self.rfile.read(declared) or b"{}")
             with RoomStore(self.app.data_dir) as store:
-                if path == "/api/chat-send":
+                if path == "/api/session-start":
+                    value = start_session(self.app.data_dir, self.app.repo, str(body.get("client") or ""), str(body.get("worktree") or ""), str(body.get("prompt") or ""))
+                elif path == "/api/session-stop":
+                    value = stop_delivery(str(body.get("client") or ""), str(body.get("session_id") or ""))
+                elif path == "/api/chat-send":
                     attachments = body.get("attachments") if isinstance(body.get("attachments"), list) else []
                     value = start_chat_delivery(self.app.data_dir, self.app.repo, str(body.get("client") or ""), str(body.get("session_id") or ""), str(body.get("message") or ""), store.members(self.app.repo.room_id), [item for item in attachments if isinstance(item, dict)])
                 elif path == "/api/rename":
@@ -1311,7 +1453,7 @@ class RoomHandler(BaseHTTPRequestHandler):
                     value = store.post_thread(self.app.repo, str(body["thread_id"]), "@human", str(body.get("message") or ""))
                 else:
                     value = store.post(self.app.repo, "@human", str(body.get("kind") or "message"), str(body.get("topic") or "general"), "posted", str(body.get("message") or ""), [str(x) for x in body.get("recipients", [])])
-            self.send_json(value, 202 if path == "/api/chat-send" else 201)
+            self.send_json(value, 202 if path in ("/api/chat-send", "/api/session-start") else 201)
             self.app.event_hub.publish("workspace.changed", {"path": path})
         except (RoomError, ValueError, json.JSONDecodeError) as error: self.send_json({"error": str(error)}, 400)
 
@@ -1347,6 +1489,8 @@ class RoomEventServer:
     def start(self) -> None:
         self.thread = threading.Thread(target=self._run, daemon=True, name="chat-room-events"); self.thread.start()
         if not self.ready.wait(8): raise RoomError("timed out starting local WebSocket events")
+        if isinstance(self.error, ModuleNotFoundError):
+            raise RoomError(f"cannot start local WebSocket events: {self.error}. The browser room needs the pinned transport, so start it through the installed `chat-room` command rather than a bare interpreter.")
         if self.error: raise RoomError(f"cannot start local WebSocket events: {self.error}")
 
     def _run(self) -> None:
@@ -1551,6 +1695,9 @@ def parser() -> argparse.ArgumentParser:
         if name == "chat": command.add_argument("--sender", default="@human")
         if name == "ui": command.add_argument("--host", default="127.0.0.1"); command.add_argument("--port", type=int, default=7391); command.add_argument("--events-port", type=int); command.add_argument("--hostname", default="chatroom.localhost"); command.add_argument("--no-open", action="store_true")
     post = sub.add_parser("post"); post.add_argument("--cwd"); post.add_argument("--sender", default="@human"); post.add_argument("--kind", choices=MESSAGE_KINDS, default="message"); post.add_argument("--topic", default="general"); post.add_argument("--status", default="posted"); post.add_argument("--recipient", action="append", default=[]); post.add_argument("--message", required=True)
+    start = sub.add_parser("start"); start.add_argument("--cwd"); start.add_argument("--client", choices=("claude", "codex"), required=True); start.add_argument("--worktree"); start.add_argument("--prompt", required=True)
+    stop = sub.add_parser("stop"); stop.add_argument("--cwd"); stop.add_argument("--client", choices=("claude", "codex"), required=True); stop.add_argument("--session", required=True)
+    search = sub.add_parser("search"); search.add_argument("--cwd"); search.add_argument("--query", required=True); search.add_argument("--limit", type=int, default=100)
     identify = sub.add_parser("identify"); identify.add_argument("--cwd"); identify.add_argument("--session", required=True); identify.add_argument("--handle", required=True)
     thread_open = sub.add_parser("thread-open"); thread_open.add_argument("--cwd"); thread_open.add_argument("--title", required=True); thread_open.add_argument("--reason", default="coordination"); thread_open.add_argument("--audience", choices=("agents", "human-loop"), default="agents"); thread_open.add_argument("--origin", default="human"); thread_open.add_argument("--lifetime", choices=("durable", "temporary"), default="durable"); thread_open.add_argument("--participant", action="append", default=[]); thread_open.add_argument("--path", action="append", default=[])
     thread_close = sub.add_parser("thread-close"); thread_close.add_argument("--cwd"); thread_close.add_argument("--thread", required=True)
@@ -1584,6 +1731,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             elif args.command == "options": value = {"room_id": repo.room_id, "options": store.options()}
             elif args.command == "read": value = {"room_id": repo.room_id, "messages": store.read(repo.room_id, args.after_id, args.limit)}
             elif args.command == "identify": value = store.claim_handle(repo, args.session, args.handle)
+            elif args.command == "start": value = start_session(args.data_dir, repo, args.client, args.worktree, args.prompt)
+            elif args.command == "stop": value = stop_delivery(args.client, args.session)
+            elif args.command == "search": value = {"room_id": repo.room_id, "messages": store.search(repo.room_id, args.query, args.limit)}
             elif args.command == "thread-open": value = store.open_thread(repo, args.title, args.reason, "@human", args.participant, args.path, "temporary-channel" if args.lifetime == "temporary" else "team-channel", metadata={"audience": args.audience, "origin": args.origin})
             elif args.command == "thread-close": value = store.close_thread(repo, args.thread)
             elif args.command == "option-set":
