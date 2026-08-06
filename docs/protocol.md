@@ -42,6 +42,8 @@ Exposed over stdio MCP. Inputs and outputs are JSON; the message schema is `chat
 | `room_session_start` | Open new agent work in a worktree of this project. |
 | `room_session_stop` | Interrupt a local turn this room started. |
 | `room_ready` | Which worktree branches merge cleanly into the integration branch, and which collide. |
+| `room_projects` | Every project with a room on this machine, worktrees grouped under it. |
+| `room_spend` | Token spend per worktree beside the commits it produced. |
 | `room_search` | Search room messages, or indexed transcripts with `scope: chats`. |
 | `room_handoff` | Post a structured handoff. |
 

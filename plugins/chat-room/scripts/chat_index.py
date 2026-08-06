@@ -88,6 +88,8 @@ class Chat(Base):
     source_size: Mapped[int] = mapped_column(Integer, default=0)
     source_mtime: Mapped[float] = mapped_column(default=0.0)
     turn_count: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    billed_tokens: Mapped[int] = mapped_column(Integer, default=0)
     indexed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
@@ -110,6 +112,11 @@ class Turn(Base):
     role: Mapped[str] = mapped_column(String(16))
     body: Mapped[str] = mapped_column(Text)
     occurred_at: Mapped[Optional[str]] = mapped_column(String(64), default=None)
+    model: Mapped[Optional[str]] = mapped_column(String(64), default=None)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cache_read_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cache_write_tokens: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class Server(Base):
@@ -194,9 +201,25 @@ def index_chat(session: Session, summary: Dict[str, Any], messages: Sequence[Dic
     # Transcripts are append-mostly, but a rewrite must not leave stale turns behind.
     session.execute(delete(Turn).where(Turn.chat_id == existing.id))
     session.add_all([
-        Turn(chat_id=existing.id, ordinal=ordinal, role=str(item.get("role") or ""), body=str(item.get("body") or ""), occurred_at=str(item.get("timestamp") or ""))
+        Turn(
+            chat_id=existing.id, ordinal=ordinal, role=str(item.get("role") or ""),
+            body=str(item.get("body") or ""), occurred_at=str(item.get("timestamp") or ""),
+            model=item.get("model"), input_tokens=int(item.get("input_tokens") or 0),
+            output_tokens=int(item.get("output_tokens") or 0),
+            cache_read_tokens=int(item.get("cache_read_tokens") or 0),
+            cache_write_tokens=int(item.get("cache_write_tokens") or 0),
+        )
         for ordinal, item in enumerate(messages)
     ])
+    existing.output_tokens = sum(int(item.get("output_tokens") or 0) for item in messages)
+    # Cache reads are the bulk of the count and a fraction of the price, so a single
+    # "billed" figure weights them down rather than letting them drown the number that
+    # actually costs something.
+    existing.billed_tokens = sum(
+        int(item.get("input_tokens") or 0) + int(item.get("output_tokens") or 0)
+        + int(item.get("cache_write_tokens") or 0) + int(item.get("cache_read_tokens") or 0) // 10
+        for item in messages
+    )
     return True
 
 
@@ -241,6 +264,25 @@ def search_turns(engine: Engine, query: str, limit: int = 50) -> List[Dict[str, 
             }
             for turn, chat in session.execute(statement).all()
         ]
+
+
+def spend_by_worktree(engine: Engine, since: datetime) -> Dict[str, Dict[str, int]]:
+    """Billed tokens, output tokens and turn count per worktree since a point in time."""
+    statement = (
+        select(
+            Chat.worktree,
+            func.sum(Chat.billed_tokens),
+            func.sum(Chat.output_tokens),
+            func.sum(Chat.turn_count),
+        )
+        .where(Chat.updated_at.is_not(None), Chat.updated_at >= since)
+        .group_by(Chat.worktree)
+    )
+    with Session(engine) as session:
+        return {
+            str(worktree or "unknown"): {"billed": int(billed or 0), "output": int(output or 0), "turns": int(turns or 0)}
+            for worktree, billed, output, turns in session.execute(statement).all()
+        }
 
 
 def summary(engine: Engine) -> Dict[str, Any]:

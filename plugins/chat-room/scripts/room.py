@@ -351,7 +351,15 @@ def chat_transcript(repo: Repository, client: str, session_id: str) -> Dict[str,
             message = item.get("message") if isinstance(item.get("message"), dict) else {}
             body = text_content(message.get("content"))
             if body:
-                messages.append({"role": role, "body": body, "timestamp": str(item.get("timestamp") or "")})
+                usage = message.get("usage") if isinstance(message.get("usage"), dict) else {}
+                messages.append({
+                    "role": role, "body": body, "timestamp": str(item.get("timestamp") or ""),
+                    "model": str(message.get("model") or "") or None,
+                    "input_tokens": int(usage.get("input_tokens") or 0),
+                    "output_tokens": int(usage.get("output_tokens") or 0),
+                    "cache_read_tokens": int(usage.get("cache_read_input_tokens") or 0),
+                    "cache_write_tokens": int(usage.get("cache_creation_input_tokens") or 0),
+                })
     return {"chat": summary, "messages": messages}
 
 
@@ -426,6 +434,14 @@ def changed_worktree_paths(path: Path) -> Set[str]:
     except (OSError, subprocess.TimeoutExpired):
         return set()
     return {entry[3:] for entry in result.stdout.split("\0") if len(entry) > 3 and entry[2] == " "}
+
+
+def branch_changed_paths(repo: Repository, target: str, branch: str) -> Set[str]:
+    """Paths a branch changes relative to where it left the target."""
+    if not branch or not target:
+        return set()
+    output = run_git(repo.worktree, "diff", "--name-only", f"{target}...{branch}", check=False)
+    return {line for line in output.splitlines() if line.strip()}
 
 
 def merge_conflict_paths(repo: Repository, left: str, right: str) -> Set[str]:
@@ -1026,18 +1042,84 @@ class RoomStore:
         """
         target = (into or "").strip() or (repo.branch if repo.branch in ("main", "master") else "main")
         branches: List[Dict[str, Any]] = []
+        touched: Dict[str, Set[str]] = {}
         for worktree in list_worktree_references(repo):
             branch = str(worktree.get("branch") or "")
-            if not branch or branch == target:
+            if not branch or branch == target or branch in touched:
                 continue
             conflicts = sorted(merge_conflict_paths(repo, target, branch))
+            touched[branch] = branch_changed_paths(repo, target, branch)
             branches.append({
                 "branch": branch, "target": str(worktree["target"]),
                 "merges_cleanly": not conflicts, "conflicts": conflicts,
+                "collides_with": [],
                 "uncommitted": len(changed_worktree_paths(Path(worktree["path"]))) if Path(worktree["path"]).exists() else 0,
             })
-        branches.sort(key=lambda item: (item["merges_cleanly"], item["branch"]))
-        return {"into": target, "clean": sum(1 for b in branches if b["merges_cleanly"]), "conflicted": sum(1 for b in branches if not b["merges_cleanly"]), "branches": branches}
+
+        # Merging cleanly into the target is not the same as being safe to land. Two branches
+        # can each merge cleanly today and still collide with each other the moment either one
+        # lands — two additions at the same place read as independent until they are not. Only
+        # pairs that touch a file in common are worth asking Git about.
+        by_branch = {item["branch"]: item for item in branches}
+        probes = 0
+        for index, left in enumerate(branches):
+            for right in branches[index + 1:]:
+                if probes >= MAX_CONFLICT_PROBES:
+                    break
+                if not touched[left["branch"]] & touched[right["branch"]]:
+                    continue
+                probes += 1
+                shared = sorted(merge_conflict_paths(repo, left["branch"], right["branch"]))
+                if not shared:
+                    continue
+                by_branch[left["branch"]]["collides_with"].append({"branch": right["branch"], "paths": shared})
+                by_branch[right["branch"]]["collides_with"].append({"branch": left["branch"], "paths": shared})
+
+        branches.sort(key=lambda item: (item["merges_cleanly"], not item["collides_with"], item["branch"]))
+        return {
+            "into": target,
+            "clean": sum(1 for b in branches if b["merges_cleanly"] and not b["collides_with"]),
+            "conflicted": sum(1 for b in branches if not b["merges_cleanly"]),
+            "latent": sum(1 for b in branches if b["merges_cleanly"] and b["collides_with"]),
+            "pairs_probed": probes,
+            "branches": branches,
+        }
+
+    def projects(self, current: Optional[Repository] = None) -> Dict[str, Any]:
+        """Every project this machine has a room for, with its worktrees grouped under it.
+
+        One room covers one Git project, so running two projects means two rooms and, until
+        now, no way to see both at once. Rooms whose checkout has moved or been removed are
+        reported as unreachable rather than quietly dropped, because a stale room is exactly
+        the kind of thing that is invisible until it confuses someone.
+        """
+        rows = self.connection.execute("SELECT room_id,project_identity,repository_root,last_seen_at FROM rooms ORDER BY last_seen_at DESC").fetchall()
+        found: List[Dict[str, Any]] = []
+        for row in rows:
+            room_id = str(row["room_id"])
+            repo = resolve_repository(str(row["repository_root"]))
+            entry: Dict[str, Any] = {
+                "room_id": room_id, "project": str(row["project_identity"]),
+                "root": str(row["repository_root"]), "last_seen_at": str(row["last_seen_at"]),
+                "current": bool(current and current.room_id == room_id),
+            }
+            if repo is None or repo.room_id != room_id:
+                entry.update(reachable=False, worktrees=[], active_agents=0)
+                found.append(entry)
+                continue
+            agents = [m for m in self.members(room_id) if m["state"] != "offline"]
+            entry.update(
+                reachable=True,
+                active_agents=len(agents),
+                blocked_agents=sum(1 for m in agents if m["state"] == "blocked"),
+                worktrees=[
+                    {"target": str(item["target"]), "branch": item.get("branch"),
+                     "agents": sum(Path(m["worktree"]).resolve() == Path(item["path"]).resolve() for m in agents)}
+                    for item in list_worktree_references(repo)
+                ],
+            )
+            found.append(entry)
+        return {"projects": found, "reachable": sum(1 for item in found if item["reachable"])}
 
     def allowed_targets(self, repo: Repository) -> Set[str]:
         allowed = {"@human"}
@@ -1345,6 +1427,8 @@ def tool_definitions() -> List[Dict[str, Any]]:
         {"name": "room_session_start", "description": "Open new agent work in a worktree of this project. Starts one local vendor CLI session; that session bills vendor tokens.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "client": {"type": "string", "enum": ["claude", "codex"]}, "worktree": {"type": "string", "description": "Absolute worktree path; defaults to the current one."}, "prompt": {"type": "string", "maxLength": 4000}}, "required": ["client", "prompt"]}},
         {"name": "room_session_stop", "description": "Interrupt a local turn this room started for a session.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "client": {"type": "string", "enum": ["claude", "codex"]}, "session_id": {"type": "string"}}, "required": ["client", "session_id"]}},
         {"name": "room_ready", "description": "Report which worktree branches merge cleanly into the integration branch and which collide, before a merge is attempted.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "into": {"type": "string", "description": "Integration branch; defaults to main."}}}},
+        {"name": "room_projects", "description": "List every project with a room on this machine, with its worktrees and active agents grouped under it.", "inputSchema": {"type": "object", "properties": {"cwd": cwd}}},
+        {"name": "room_spend", "description": "Report token spend per worktree beside the commits it produced, so cost is comparable rather than raw.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "days": {"type": "integer", "minimum": 1, "maximum": 90}}}},
         {"name": "room_search", "description": "Search this room's message history, or indexed local CLI transcripts, beyond the recent window.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "query": {"type": "string"}, "scope": {"type": "string", "enum": ["room", "chats"]}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}}, "required": ["query"]}},
         {"name": "room_handoff", "description": "Post a structured handoff with source, paths, proof, blocker, and next owner.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "sender": {"type": "string"}, "session_id": {"type": "string"}, "topic": {"type": "string"}, "source_sha": {"type": "string"}, "paths": {"type": "array", "items": {"type": "string"}}, "proof": {"type": "string"}, "blocker": {"type": "string"}, "next_owner": {"type": "string"}}, "required": ["topic", "source_sha", "paths", "proof", "next_owner"]}},
     ]
@@ -1379,6 +1463,10 @@ def execute_tool(store: RoomStore, name: str, args: Dict[str, Any]) -> Any:
         return stop_delivery(str(args["client"]), str(args["session_id"]))
     if name == "room_ready":
         return store.merge_readiness(repo, str(args.get("into") or ""))
+    if name == "room_projects":
+        return store.projects(repo)
+    if name == "room_spend":
+        return spend_report(store.data_dir, repo, int(args.get("days", 7)))
     if name == "room_search":
         if str(args.get("scope") or "room") == "chats":
             return {"room_id": repo.room_id, "turns": search_transcripts(store.data_dir, str(args["query"]), int(args.get("limit", 100)))}
@@ -1844,6 +1932,40 @@ def run_index(data_dir: Path, repo: Repository) -> Dict[str, Any]:
     return result
 
 
+def spend_report(data_dir: Path, repo: Repository, days: int = 7) -> Dict[str, Any]:
+    """What each worktree cost, and what it produced for it.
+
+    Raw token counts do not mean anything to a person — a session reporting three hundred
+    million cache reads reads as noise. What is legible is the comparison: spend beside the
+    commits that spend produced, so an expensive worktree that is landing work looks
+    different from an expensive one that is not.
+    """
+    index = load_chat_index()
+    if index is None:
+        raise RoomError("spend needs the optional index: install chat-room[index], then run `chat-room index`")
+    try:
+        engine = index.build_engine(data_dir)
+    except index.IndexUnavailable as error:
+        raise RoomError(str(error)) from error
+    since = (datetime.now(timezone.utc) - timedelta(days=max(1, int(days)))).replace(microsecond=0)
+    totals = index.spend_by_worktree(engine, since)
+    landed = {}
+    for worktree in list_worktree_references(repo):
+        branch = str(worktree.get("branch") or "")
+        count = run_git(repo.worktree, "rev-list", "--count", f"--since={since.date().isoformat()}", branch, check=False) if branch else ""
+        landed[Path(str(worktree["path"])).name] = int(count) if count.isdigit() else 0
+    rows = []
+    for name, value in sorted(totals.items(), key=lambda item: -item[1]["billed"]):
+        commits = landed.get(name, 0)
+        rows.append({
+            "worktree": "#" + slug(name, "root"), "billed_tokens": value["billed"],
+            "output_tokens": value["output"], "turns": value["turns"], "commits": commits,
+            "tokens_per_commit": (value["billed"] // commits) if commits else None,
+        })
+    return {"since": since.isoformat().replace("+00:00", "Z"), "days": days, "worktrees": rows,
+            "billed_total": sum(r["billed_tokens"] for r in rows), "commits_total": sum(r["commits"] for r in rows)}
+
+
 def search_transcripts(data_dir: Path, query: str, limit: int = 50) -> List[Dict[str, Any]]:
     index = load_chat_index()
     if index is None:
@@ -1909,6 +2031,8 @@ def parser() -> argparse.ArgumentParser:
     search = sub.add_parser("search"); search.add_argument("--cwd"); search.add_argument("--query", required=True); search.add_argument("--limit", type=int, default=100); search.add_argument("--scope", choices=("room", "chats"), default="room")
     index = sub.add_parser("index"); index.add_argument("--cwd")
     ready = sub.add_parser("ready"); ready.add_argument("--cwd"); ready.add_argument("--into")
+    sub.add_parser("projects").add_argument("--cwd")
+    spend = sub.add_parser("spend"); spend.add_argument("--cwd"); spend.add_argument("--days", type=int, default=7)
     identify = sub.add_parser("identify"); identify.add_argument("--cwd"); identify.add_argument("--session", required=True); identify.add_argument("--handle", required=True)
     thread_open = sub.add_parser("thread-open"); thread_open.add_argument("--cwd"); thread_open.add_argument("--title", required=True); thread_open.add_argument("--reason", default="coordination"); thread_open.add_argument("--audience", choices=("agents", "human-loop"), default="agents"); thread_open.add_argument("--origin", default="human"); thread_open.add_argument("--lifetime", choices=("durable", "temporary"), default="durable"); thread_open.add_argument("--participant", action="append", default=[]); thread_open.add_argument("--path", action="append", default=[])
     thread_close = sub.add_parser("thread-close"); thread_close.add_argument("--cwd"); thread_close.add_argument("--thread", required=True)
@@ -1950,6 +2074,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             elif args.command == "stop": value = stop_delivery(args.client, args.session)
             elif args.command == "index": value = run_index(args.data_dir, repo)
             elif args.command == "ready": value = store.merge_readiness(repo, args.into)
+            elif args.command == "projects": value = store.projects(repo)
+            elif args.command == "spend": value = spend_report(args.data_dir, repo, args.days)
             elif args.command == "search":
                 if args.scope == "chats": value = {"room_id": repo.room_id, "turns": search_transcripts(args.data_dir, args.query, args.limit)}
                 else: value = {"room_id": repo.room_id, "messages": store.search(repo.room_id, args.query, args.limit)}
