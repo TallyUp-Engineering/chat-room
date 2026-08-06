@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://chat-room.openai.site"),
+  metadataBase: new URL("https://engineering-room.eitzko.chatgpt.site"),
   title: "Chat Room",
   description: "The local chat room for humans and coding agents.",
   applicationName: "Chat Room",

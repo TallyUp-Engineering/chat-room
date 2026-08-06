@@ -1,0 +1,25 @@
+name: Feature request
+description: Propose a generic coordination capability
+title: "[proposal] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Coordination problem
+      description: Describe the workflow failure, independent of one company or repository.
+    validations:
+      required: true
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Authority and safety boundary
+      description: Explain how the feature remains advisory and value-free.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Useful outcome
+    validations:
+      required: true
