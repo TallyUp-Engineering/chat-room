@@ -29,6 +29,7 @@
           <form id="thread-form" class="thread-form" hidden>
             <input id="thread-title" maxlength="120" required placeholder="What needs coordination?">
             <select id="thread-reason"><option>design direction</option><option>preemptive conflict</option><option>review</option><option>handoff</option><option>blocker</option><option>other coordination</option></select>
+            <select id="thread-lifetime"><option value="durable">Durable team channel</option><option value="temporary">Temporary coordination channel</option></select>
             <input id="thread-participants" placeholder="@actor #worktree">
             <input id="thread-paths" placeholder="optional/path another/path">
             <span><button type="submit">Open</button><button id="cancel-thread" type="button">Cancel</button></span>
@@ -47,7 +48,7 @@
         <header><div><b id="view-title">All activity</b><small id="identity">local Git project · combined room</small></div><div class="view-actions"><button id="rename-view" type="button">Rename</button><button id="close-thread" type="button" hidden>Resolve</button><span id="view-status" class="connected">● connected locally</span></div></header>
         <div id="messages" class="messages"><p class="notice">Room data stays on this machine. Local CLI histories stay vendor-owned and are never copied into the room database.</p></div>
         <p id="error" class="error" hidden></p>
-        <form id="composer"><div class="tools"><b>B</b>　<i>I</i>　 @　 #　 <span id="compose-label">message as @human · ad hoc tagging is built in</span></div><div class="compose"><textarea id="message" maxlength="4000" placeholder="Message the combined room. Tag an active @actor or #worktree."></textarea><button>Send</button></div></form>
+        <form id="composer"><div class="tools"><b>B</b>　<i>I</i>　 @　 #　 <button id="attach-image" type="button" title="Attach images" aria-label="Attach images">📎</button><input id="image-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden><span id="compose-label">message as @human · ad hoc tagging is built in</span></div><div id="attachments" class="attachments" hidden></div><div class="compose"><textarea id="message" maxlength="4000" placeholder="Message the combined room. Tag an active @actor or #worktree."></textarea><button id="send-message">Send</button></div></form>
       </section>
       <aside class="buddies"><div class="self"><span>H</span><div><b>@human</b><small>local operator</small></div></div><select><option>Available</option><option>Heads down</option><option>Away</option></select><div id="members"></div></aside>
       <footer><span id="authority">advisory-only</span><span id="counts">0 messages • 0 active</span></footer>

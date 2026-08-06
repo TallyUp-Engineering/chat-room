@@ -6,14 +6,21 @@ REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 BIN_DIR=${CHAT_ROOM_BIN_DIR:-"$HOME/.local/bin"}
 TARGET="$BIN_DIR/chat-room"
 SOURCE="$REPO_ROOT/plugins/chat-room/scripts/room.py"
+RUNTIME_DIR=${CHAT_ROOM_RUNTIME_DIR:-"$HOME/.local/share/chat-room/runtime"}
 
 mkdir -p "$BIN_DIR"
+python3 -m venv "$RUNTIME_DIR"
+"$RUNTIME_DIR/bin/python" -m pip install --disable-pip-version-check -r "$REPO_ROOT/requirements.txt"
 
-if [ -e "$TARGET" ] && [ ! -L "$TARGET" ]; then
-  echo "chat-room: refusing to replace non-symlink $TARGET" >&2
+if [ -L "$TARGET" ]; then
+  rm "$TARGET"
+elif [ -e "$TARGET" ] && ! grep -q "chat-room managed launcher" "$TARGET"; then
+  echo "chat-room: refusing to replace existing $TARGET" >&2
   exit 2
 fi
-
-ln -sfn "$SOURCE" "$TARGET"
-echo "Installed $TARGET -> $SOURCE"
+TEMPORARY="$TARGET.tmp.$$"
+printf '%s\n' '#!/bin/sh' '# chat-room managed launcher' "exec \"$RUNTIME_DIR/bin/python\" \"$SOURCE\" \"\$@\"" > "$TEMPORARY"
+chmod 0755 "$TEMPORARY"
+mv "$TEMPORARY" "$TARGET"
+echo "Installed $TARGET with local runtime $RUNTIME_DIR"
 echo "Run: chat-room status"

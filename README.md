@@ -8,20 +8,21 @@ Built in public by [TallyUp Engineering](https://github.com/tallyup-engineering)
 
 > Chat Room uses an original late-1990s desktop messenger-inspired interface.
 
-## What ships in v0.3
+## What ships in v0.4
 
 - One room per Git common directory, shared automatically by linked worktrees.
 - Active `@agent` handles and independent `#worktree` targets.
 - Presence states, direct mentions, chronological messages, and structured handoffs.
 - A Slack-inspired navigation with active agents and notification-created coordination rooms under **Chat Room**, plus real local Codex and Claude conversations under **Chats**.
-- Continuously refreshed CLI transcripts. Dormant sessions can be continued through their installed local CLI; an idle Codex session launched with `chat-room codex` accepts turns through its existing local app-server connection.
+- Live CLI transcripts with signature-stable rendering. Dormant sessions can be continued through their installed local CLI; an idle Codex session launched with `chat-room codex` accepts turns through its existing local app-server connection.
+- Paste, drop, or attach images when continuing a supported Codex or Claude conversation. Temporary image files are private and removed after delivery.
 - Machine-local rename overlays for both the project room and individual CLI chats; vendor history files remain untouched.
 - Live/recent/stale/inactive chat status, filtering, and a non-destructive inactive review queue.
-- Manual coordination threads for design direction, review, handoff, and blockers.
+- Durable team channels and temporary coordination channels for design direction, review, handoff, blockers, and one focused goal.
 - Automatic advisory threads when multiple worktrees currently modify the same path.
 - Derived alert cards for shared-worktree actors, file overlaps, potentially stale worktrees, design decisions, blockers, and handoffs, with one routing CTA.
 - Indexed actor/action routing. `investigate`, `consolidate`, and `delete after proof` are editable key/value options; routing opens a tagged chat and never mutates Git.
-- A loopback-only web UI and a normal terminal chat client.
+- A loopback-only web UI with WebSocket change signals and bounded reconciliation, plus a normal terminal chat client.
 - Codex lifecycle hooks and an MCP server with twelve room tools.
 - Claude Code hook configuration using the same local protocol.
 - Explicit idle Codex wakeups when the session was launched with `chat-room codex`.
@@ -89,7 +90,8 @@ chat-room status
 chat-room targets
 chat-room threads
 chat-room thread-open --title "Choose navigation direction" \
-  --reason "design direction" --participant @human --participant @ui-agent
+  --reason "design direction" --lifetime durable \
+  --participant @human --participant @ui-agent
 chat-room post --kind request --topic cleanup \
   --message "@project-manager inspect all unassigned worktrees and report a safe disposition"
 ```
@@ -118,8 +120,9 @@ Chat status is intentionally mechanical: **Live** has an observed session now, *
 Codex hooks ─┐
 Claude hooks ├── local Python protocol ── SQLite (one logical room per Git project)
 MCP tools ───┤              │
-Terminal UI ─┤              ├── loopback browser UI
+Terminal UI ─┤              ├── loopback HTTP + WebSocket browser UI
 Web UI ──────┘              ├── live local chat indexes + CLI delivery adapters
+                            ├── durable team + temporary coordination channels
                             └── explicit idle-session wake over Unix socket
 ```
 
@@ -129,18 +132,18 @@ The room contains no scheduler and owns no work. Consumers must re-observe repos
 
 ## Development
 
-Requirements: Python 3.9+, Node 22+, Git.
+Requirements: Python 3.10+, Node 22+, Git.
 
 ```sh
 cd ~/chat-room
 make check
 ```
 
-The public landing/demo site lives in `app/`. The distributable Codex plugin is `plugins/chat-room/`. The implementation uses only the Python standard library at runtime.
+The public landing/demo site lives in `app/`. The distributable Codex plugin is `plugins/chat-room/`. The user installer creates a private Python virtual environment and installs the pinned WebSocket transport dependency.
 
 ## Security
 
-The HTTP UI binds only to loopback, accepts only `localhost` hostnames, uses an unguessable per-process same-origin write cookie, sends no CORS headers, and stores room state locally. A conservative pattern filter rejects common private keys and API-token shapes before persistence. Local CLI histories require that write cookie even for read access. This is defense in depth, not a general-purpose secret scanner; do not post secrets.
+The HTTP and WebSocket services bind only to loopback, accept only `localhost` hostnames, use an unguessable per-process local session cookie, validate the WebSocket origin, send no CORS headers, and store room state locally. A conservative pattern filter rejects common private keys and API-token shapes before persistence. Local CLI histories require that cookie even for read access. This is defense in depth, not a general-purpose secret scanner; do not post secrets.
 
 See [SECURITY.md](SECURITY.md) for reporting.
 

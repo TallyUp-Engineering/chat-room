@@ -203,6 +203,7 @@ h2 {
 .history-item small, .thread-item small { margin-top: 2px; color: #748099; font-size: 8px; }
 .history-mark, .thread-mark { width: 18px; height: 18px; display: grid; flex: 0 0 auto; place-items: center; border-radius: 4px; background: #d6e3fb; color: #2852a2; font-size: 8px; font-weight: 700; }
 .thread-mark { background: #fff0b3; color: #705a00; }
+.channel-group-title { padding: 8px 12px 4px; color: #58709b; font-size: 8px; font-weight: 800; letter-spacing: .08em; }
 .alert-item { margin: 3px 0; padding: 6px 7px; display: grid; grid-template-columns: 25px minmax(0, 1fr) auto; gap: 7px; align-items: center; border: 1px solid #d9c77b; border-radius: 4px; background: #fff8d8; }
 .alert-item.critical { border-color: #dd939b; background: #ffe7e9; }
 .alert-item.attention { border-color: #aebfe0; background: #f1f5fd; }
@@ -302,6 +303,13 @@ h2 {
 }
 #composer { position: sticky; bottom: 0; z-index: 2; box-shadow: 0 -7px 14px #20345d12; }
 .tools span { color: #61708c; font: 9px Tahoma, sans-serif; }
+.tools button { margin: 0 4px; padding: 1px 5px; border: 1px solid #a7b6d1; border-radius: 3px; background: #fff; color: #38517f; cursor: pointer; }
+.tools button:disabled { cursor: not-allowed; opacity: .45; }
+.attachments { padding: 6px 8px; display: flex; gap: 6px; overflow-x: auto; border-bottom: 1px solid #c4cde0; background: #e8effc; }
+.attachment { min-width: 118px; padding: 4px; display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; align-items: center; gap: 5px; border: 1px solid #adbcda; border-radius: 4px; background: #fff; }
+.attachment img { width: 30px; height: 30px; object-fit: cover; border-radius: 3px; }
+.attachment b { overflow: hidden; color: #445675; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.attachment button { border: 0; background: transparent; color: #7f3340; cursor: pointer; }
 .compose { padding: 8px; display: grid; grid-template-columns: 1fr 70px; gap: 8px; background: #eef3fd; }
 .compose textarea { min-height: 70px; resize: none; padding: 9px; border: 1px solid #778eb9; border-radius: 3px; outline: none; }
 .compose textarea:focus { box-shadow: 0 0 0 2px #b9cefa; }

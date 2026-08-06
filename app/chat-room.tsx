@@ -29,7 +29,7 @@ const localChatGroups = [
   { label: "Claude", chats: [["Reference contract cleanup", "tallyup · Today"], ["Review the public release", "chat-room · Yesterday"]] },
 ];
 
-const coordinationThreads = [["Potential conflict: app/ui.tsx", "2 worktrees · 3 actors"], ["Choose navigation direction", "design direction · @human"]];
+const coordinationThreads = [["Potential conflict: app/ui.tsx", "temporary · 2 worktrees · 3 actors"], ["Release coordination", "durable · @project-manager"]];
 
 function highlight(value: string) {
   const pieces = value.split(/(@[a-z0-9-]+|#[a-z0-9-]+)/gi);
@@ -81,7 +81,7 @@ export function ChatRoom() {
           <div className="menu-bar"><span>Room</span><span>People</span><span>Actions</span><span>Help</span></div>
           <div className="room-layout">
             <aside className="rail">
-              <details className="nav-section" open><summary><span>Chat Room</span><b>{unread}</b></summary><div className="active-strip"><button onClick={() => setDraft("@project-manager ")}><span className="presence-dot"/>@project-manager</button><button onClick={() => setDraft("@ui-agent ")}><span className="presence-dot"/>@ui-agent</button><button onClick={() => setDraft("@api-agent ")}><span className="presence-dot idle"/>@api-agent</button></div><button className={`room-item combined ${viewKind === "room" ? "active" : ""}`} onClick={() => { setRoom("All activity"); setViewKind("room"); }}><span className="combined-icon">◎</span><span><strong>All activity</strong><small>Combined room · read</small></span></button><div className="rail-subhead">Needs attention</div><button className="notification" onClick={() => { setRoom("Potentially stale worktree"); setViewKind("thread"); }}><span>!</span><span><strong>Potentially stale worktree</strong><small>Choose actor + indexed action · Route</small></span></button><div className="rail-subhead">Coordination rooms</div>{coordinationThreads.map(([title, detail]) => <button className={`room-item thread-item ${room === title ? "selected" : ""}`} key={title} onClick={() => { setRoom(title); setViewKind("thread"); }}><span className="thread-icon">#</span><span><strong>{title}</strong><small>{detail}</small></span></button>)}<button className="add-interface" type="button">＋ Open coordination room</button></details>
+              <details className="nav-section" open><summary><span>Chat Room</span><b>{unread}</b></summary><div className="active-strip"><button onClick={() => setDraft("@project-manager ")}><span className="presence-dot"/>@project-manager</button><button onClick={() => setDraft("@ui-agent ")}><span className="presence-dot"/>@ui-agent</button><button onClick={() => setDraft("@api-agent ")}><span className="presence-dot idle"/>@api-agent</button></div><button className={`room-item combined ${viewKind === "room" ? "active" : ""}`} onClick={() => { setRoom("All activity"); setViewKind("room"); }}><span className="combined-icon">◎</span><span><strong>All activity</strong><small>Combined room · read</small></span></button><div className="rail-subhead">Needs attention</div><button className="notification" onClick={() => { setRoom("Potentially stale worktree"); setViewKind("thread"); }}><span>!</span><span><strong>Potentially stale worktree</strong><small>Choose actor + indexed action · Route</small></span></button><div className="rail-subhead">Channels</div>{coordinationThreads.map(([title, detail]) => <button className={`room-item thread-item ${room === title ? "selected" : ""}`} key={title} onClick={() => { setRoom(title); setViewKind("thread"); }}><span className="thread-icon">#</span><span><strong>{title}</strong><small>{detail}</small></span></button>)}<button className="add-interface" type="button">＋ New channel</button></details>
               <details className="nav-section" open><summary><span>Chats</span><b>5</b></summary>{localChatGroups.map((group) => <div className="interface-group" key={group.label}><div className="interface-title"><span>{group.label}</span><b>{group.chats.length}</b></div>{group.chats.map(([name, detail]) => <button className={`room-item session ${room === name ? "selected" : ""}`} key={`${group.label}-${name}`} onClick={() => { setRoom(name); setViewKind("history"); }}><span className="history-icon">{group.label[0]}</span><span><strong>{name}</strong><small>{detail}</small></span></button>)}</div>)}</details>
               <div className="rail-note"><strong>Room ≠ authority.</strong><br/>Messages coordinate intent. Repository and provider state decide what is true.</div>
             </aside>
@@ -108,10 +108,10 @@ export function ChatRoom() {
       </section>
 
       <section className="feature-strip" id="how-it-works">
-        <article className="feature"><b>One room per Git project</b><p>Linked worktrees resolve to the same room through their Git common directory.</p></article>
-        <article className="feature"><b>Address live sessions</b><p>Stable @handles identify agents. #worktree tags reach whichever active agent owns that lane.</p></article>
-        <article className="feature"><b>Wake idle Codex</b><p>Launch through the room and an explicit tag can start a turn through the local app server.</p></article>
-        <article className="feature"><b>Safe by construction</b><p>Loopback-only UI, local SQLite, credential-pattern rejection, and advisory semantics.</p></article>
+        <article className="feature"><b>Coordinate open CLIs</b><p>See active actors together and pull the right sessions into one focused channel.</p></article>
+        <article className="feature"><b>Prevent collisions</b><p>Potential shared-worktree and same-file conflicts become temporary coordination channels.</p></article>
+        <article className="feature"><b>Find neglected work</b><p>Mechanical activity signals surface potentially stale worktrees for investigation, never automatic deletion.</p></article>
+        <article className="feature"><b>Keep authority clear</b><p>Loopback-only coordination stays advisory; Git and provider observations remain authoritative.</p></article>
       </section>
 
       <footer className="site-footer"><span>Apache-2.0 • Built in public by TallyUp Engineering</span><span>Original retro desktop messenger interface.</span></footer>

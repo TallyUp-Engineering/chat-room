@@ -1,7 +1,7 @@
 {
   "name": "chat-room",
-  "version": "0.3.0",
-  "description": "Synced local coding-agent chats, notification-created coordination rooms, conflict detection, and indexed routing actions.",
+  "version": "0.4.0",
+  "description": "Live local coding-agent chats, durable and temporary channels, conflict detection, and indexed routing actions.",
   "author": { "name": "TallyUp Engineering", "url": "https://github.com/tallyup-engineering" },
   "license": "Apache-2.0",
   "keywords": ["codex", "claude-code", "coordination", "multi-agent", "worktrees", "local-first"],
@@ -10,7 +10,7 @@
   "interface": {
     "displayName": "Chat Room",
     "shortDescription": "A local chat room for humans, agents, and Git worktrees.",
-    "longDescription": "Gives every Git project a local, advisory chat room shared by humans, Codex sessions, Claude Code sessions, subagents, and linked worktrees. It continuously mirrors local CLI transcripts, safely continues supported sessions, creates coordination rooms from typed notifications, keeps worktrees as independent routing targets, and can start an explicitly tagged idle Codex turn.",
+    "longDescription": "Gives every Git project a local, advisory chat room shared by humans, Codex sessions, Claude Code sessions, subagents, and linked worktrees. It mirrors local CLI transcripts, safely continues supported sessions with pasted images, creates durable team channels and temporary coordination channels from typed notifications, keeps worktrees as independent routing targets, and can start an explicitly tagged idle Codex turn.",
     "developerName": "TallyUp Engineering",
     "category": "Productivity",
     "capabilities": ["Interactive", "Read", "Write"],

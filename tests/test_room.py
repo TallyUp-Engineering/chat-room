@@ -3,6 +3,7 @@ import io
 import json
 import os
 import sqlite3
+import stat
 import sys
 import tempfile
 import unittest
@@ -84,6 +85,9 @@ class RoomTests(unittest.TestCase):
         self.assertIn("openThread", script)
         self.assertIn("/api/chat-send", script)
         self.assertIn("/api/rename", script)
+        self.assertIn("new WebSocket", script)
+        self.assertIn("clipboardData", script)
+        self.assertNotIn("setInterval(refreshRoom", script)
 
     def test_terminal_chat_registers_and_releases_cli_presence(self):
         repo = self.repo()
@@ -103,6 +107,16 @@ class RoomTests(unittest.TestCase):
             self.assertEqual(posted["topic"], f"thread:{thread['id']}")
             self.assertEqual(posted["metadata"]["thread_id"], thread["id"])
             self.assertEqual(posted["recipients"], ["#lane", "@human"])
+            self.assertEqual(thread["lifetime"], "durable")
+            self.assertEqual(store.close_thread(repo, thread["id"])["status"], "archived")
+
+    def test_temporary_channel_resolves_and_channel_rename_is_local(self):
+        repo = self.repo()
+        with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store, mock.patch.object(room, "list_worktree_references", return_value=[]):
+            thread = store.open_thread(repo, "Short-lived settlement", "coordination", "@human", ["@human"], [], "temporary-channel")
+            self.assertEqual(thread["lifetime"], "temporary")
+            self.assertEqual(store.rename(repo, "channel", thread["id"], "Settled direction")["label"], "Settled direction")
+            self.assertEqual(store.thread(repo, thread["id"])["title"], "Settled direction")
             self.assertEqual(store.close_thread(repo, thread["id"])["status"], "resolved")
 
     def test_preemptive_overlap_opens_thread_without_changing_git(self):
@@ -204,6 +218,33 @@ class RoomTests(unittest.TestCase):
         self.assertEqual(process.stdin.value, (prompt + "\n").encode())
         self.assertEqual(value["status"], "started")
         room.CHAT_DELIVERIES.clear()
+
+    def test_chat_images_are_bounded_private_and_passed_to_codex(self):
+        repo = self.repo()
+        summary = {"client": "Codex", "id": "session-image", "cwd": "/project/lane", "worktree": "lane"}
+        attachment = {"name": "paste.png", "type": "image/png", "data": "data:image/png;base64,iVBORw0KGgo="}
+        class Sink:
+            def write(self, _value): return None
+            def close(self): return None
+        process = mock.Mock(pid=43, stdin=Sink())
+        process.poll.return_value = None
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(room, "discover_chat_catalog", return_value=([summary], {})), mock.patch.object(room, "path_belongs_to_room", return_value=True), mock.patch.object(room.shutil, "which", return_value="/usr/local/bin/codex"), mock.patch.object(room.subprocess, "Popen", return_value=process) as popen:
+            value = room.start_chat_delivery(Path(temp), repo, "Codex", "session-image", "review this", [], [attachment])
+            command = popen.call_args.args[0]
+            image_path = Path(command[command.index("--image") + 1])
+            self.assertEqual(stat.S_IMODE(image_path.stat().st_mode), 0o600)
+            self.assertEqual(image_path.read_bytes(), b"\x89PNG\r\n\x1a\n")
+            self.assertNotIn("review this", command)
+            self.assertEqual(value["images"], 1)
+        room.CHAT_DELIVERIES.clear()
+
+    def test_event_hub_preserves_indexed_event_order(self):
+        hub = room.EventHub()
+        receiver = hub.subscribe()
+        hub.publish("workspace.changed", {"path": "/api/messages"})
+        hub.publish("workspace.changed", {"path": "/api/threads"})
+        self.assertEqual([receiver.get_nowait()["sequence"], receiver.get_nowait()["sequence"]], [1, 2])
+        hub.unsubscribe(receiver)
 
     def test_room_and_chat_renames_are_local_index_overlays(self):
         repo = self.repo()
