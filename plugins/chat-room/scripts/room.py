@@ -74,6 +74,13 @@ WAKE_COOLDOWN_SECONDS = 60
 # ponytail: the browser re-fetches this on every change signal, so it is a window, not
 # the archive. Raise it, or page the room log, if a room ever needs deeper scrollback.
 SNAPSHOT_MESSAGE_LIMIT = 300
+# The local HTTP surface, named once so the handler, the tests, and docs/protocol.md
+# cannot drift apart. Every one of these requires the per-process local token.
+HTTP_READ_ROUTES = ("/api/snapshot", "/api/search", "/api/chats", "/api/chat")
+HTTP_WRITE_ROUTES = (
+    "/api/messages", "/api/threads", "/api/thread-close", "/api/chat-send",
+    "/api/route-alert", "/api/rename", "/api/session-start", "/api/session-stop",
+)
 CONFLICT_SCAN_LOCK = threading.Lock()
 CONFLICT_SCANS: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
 CONFLICT_SCANS_RUNNING: Set[str] = set()
@@ -1463,7 +1470,7 @@ class RoomHandler(BaseHTTPRequestHandler):
         if not self.valid_host(): self.send_error(HTTPStatus.MISDIRECTED_REQUEST); return
         if not self.authorized(): self.send_json({"error": "invalid local token"}, 403); return
         path = urlparse(self.path).path
-        if path not in ("/api/messages", "/api/threads", "/api/thread-close", "/api/chat-send", "/api/route-alert", "/api/rename", "/api/session-start", "/api/session-stop"): self.send_error(404); return
+        if path not in HTTP_WRITE_ROUTES: self.send_error(404); return
         try:
             declared = int(self.headers.get("Content-Length", "0"))
             maximum = MAX_CHAT_IMAGE_BYTES * MAX_CHAT_IMAGES * 2 if path == "/api/chat-send" else 16384

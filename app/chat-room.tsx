@@ -25,8 +25,8 @@ const buddyGroups = [
 ];
 
 const localChatGroups = [
-  { label: "Codex", chats: [["Repair the release pipeline", "tallyup · Today"], ["Design the room navigation", "chat-room · Today"], ["Reconcile provider evidence", "tallyup · Yesterday"]] },
-  { label: "Claude", chats: [["Reference contract cleanup", "tallyup · Today"], ["Review the public release", "chat-room · Yesterday"]] },
+  { label: "Codex", chats: [["Repair the release pipeline", "api-gateway · Today"], ["Design the room navigation", "chat-room · Today"], ["Rebuild the search index", "api-gateway · Yesterday"]] },
+  { label: "Claude", chats: [["Tidy the migration ladder", "web-client · Today"], ["Review the public release", "chat-room · Yesterday"]] },
 ];
 
 const coordinationThreads = [["Potential conflict: app/ui.tsx", "temporary · 2 worktrees · 3 actors"], ["Release coordination", "durable · @project-manager"]];
@@ -63,8 +63,8 @@ export function ChatRoom() {
   return (
     <main className="site-shell">
       <nav className="site-nav" aria-label="Primary navigation">
-        <div className="wordmark"><span className="wordmark-mark">CR</span><span>Chat Room<small>by TallyUp Engineering</small></span></div>
-        <div className="nav-links"><a href="#how-it-works">How it works</a><a href="https://github.com/tallyup-engineering/chat-room">Docs</a><a className="nav-cta" href="https://github.com/tallyup-engineering/chat-room">View on GitHub ↗</a></div>
+        <div className="wordmark"><span className="wordmark-mark">CR</span><span>Chat Room<small>local-first coordination</small></span></div>
+        <div className="nav-links"><a href="#how-it-works">How it works</a><a href="https://github.com/TallyUp-Engineering/chat-room">Docs</a><a className="nav-cta" href="https://github.com/TallyUp-Engineering/chat-room">View on GitHub ↗</a></div>
       </nav>
 
       <section className="hero">
@@ -72,8 +72,8 @@ export function ChatRoom() {
           <div className="eyebrow">Local-first • open source • agent-aware</div>
           <h1>The chat room for your <span>engineering team.</span></h1>
           <p>Give humans, Codex, Claude, and every Git worktree one shared place to coordinate. Tag an active agent. Wake an idle session. Keep Git—not chat—as authority.</p>
-          <div className="hero-actions"><a className="primary" href="https://github.com/tallyup-engineering/chat-room">Get Chat Room</a><a className="secondary" href="#how-it-works">See the protocol</a></div>
-          <code className="install">codex plugin marketplace add tallyup-engineering/chat-room</code>
+          <div className="hero-actions"><a className="primary" href="https://github.com/TallyUp-Engineering/chat-room">Get Chat Room</a><a className="secondary" href="#how-it-works">See the protocol</a></div>
+          <code className="install">codex plugin marketplace add TallyUp-Engineering/chat-room</code>
         </div>
 
         <div className="messenger" aria-label="Interactive Chat Room demo">
@@ -114,7 +114,7 @@ export function ChatRoom() {
         <article className="feature"><b>Keep authority clear</b><p>Loopback-only coordination stays advisory; Git and provider observations remain authoritative.</p></article>
       </section>
 
-      <footer className="site-footer"><span>Apache-2.0 • Built in public by TallyUp Engineering</span><span>Original retro desktop messenger interface.</span></footer>
+      <footer className="site-footer"><span>Apache-2.0 • Runs entirely on your machine</span><span>Original retro desktop messenger interface.</span></footer>
     </main>
   );
 }
