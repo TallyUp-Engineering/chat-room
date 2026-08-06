@@ -1795,7 +1795,7 @@ def indexable_transcripts(repo: Repository) -> Iterator[Dict[str, Any]]:
 def run_index(data_dir: Path, repo: Repository) -> Dict[str, Any]:
     index = load_chat_index()
     if index is None:
-        raise RoomError("the transcript index needs its optional dependencies: pip install -r requirements-index.txt")
+        raise RoomError("the transcript index needs its optional dependencies: pipx inject chat-room sqlalchemy alembic, or install chat-room[index]")
     try:
         engine = index.build_engine(data_dir)
     except index.IndexUnavailable as error:
@@ -1809,7 +1809,7 @@ def run_index(data_dir: Path, repo: Repository) -> Dict[str, Any]:
 def search_transcripts(data_dir: Path, query: str, limit: int = 50) -> List[Dict[str, Any]]:
     index = load_chat_index()
     if index is None:
-        raise RoomError("searching inside transcripts needs the optional index: pip install -r requirements-index.txt, then run `chat-room index`")
+        raise RoomError("searching inside transcripts needs the optional index: install chat-room[index], then run `chat-room index`")
     try:
         return index.search_turns(index.build_engine(data_dir), query, limit)
     except index.IndexUnavailable as error:

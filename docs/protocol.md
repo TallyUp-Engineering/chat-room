@@ -80,7 +80,7 @@ sixty seconds.
 
 ## Optional transcript index
 
-With the extras in `requirements-index.txt` installed, local transcripts are indexed into
+With the `index` extra installed, local transcripts are indexed into
 **actor**, **chat**, **turn**, and **server** tables and `scope: chats` searches inside them.
 SQLite is the default; `CHAT_ROOM_DATABASE_URL` selects Postgres. Chat Room runs without any
 of it — every caller degrades to reading vendor files directly.

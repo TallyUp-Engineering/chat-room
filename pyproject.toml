@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chat-room"
+description = "A local chat room for humans, coding agents, and every worktree in a Git project."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+keywords = ["coordination", "multi-agent", "worktrees", "local-first", "claude-code", "codex"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Version Control :: Git",
+]
+# The browser room needs a WebSocket transport. Everything else is standard library,
+# which is what keeps `pipx install chat-room` a single fast step.
+dependencies = ["websockets==17.0.1"]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+# The transcript index. Never required: without it the room reads vendor session files
+# directly, and every entry point degrades rather than failing.
+index = [
+  "sqlalchemy>=2.0,<3.0",
+  "alembic>=1.13",
+  "psycopg[binary]>=3.2",
+]
+
+[project.urls]
+Homepage = "https://worktree.chat"
+Source = "https://github.com/TallyUp-Engineering/chat-room"
+
+[project.scripts]
+chat-room = "chat_room.scripts.room:main"
+
+[tool.setuptools]
+# The distributable plugin directory is the package. Mapping it this way means the
+# installed layout matches the repository layout exactly, so `assets/` still resolves
+# from `scripts/room.py` as `parents[1] / "assets"` with no path handling for the
+# installed case — one fewer thing that can be right in a checkout and wrong in a wheel.
+package-dir = { chat_room = "plugins/chat-room" }
+packages = ["chat_room", "chat_room.scripts"]
+
+[tool.setuptools.dynamic]
+version = { attr = "chat_room.scripts.room.VERSION" }
+
+[tool.setuptools.package-data]
+chat_room = [
+  "assets/*",
+  "hooks/*.json",
+  "skills/chat-room/*.md",
+  ".mcp.json",
+  ".codex-plugin/*.json",
+]
