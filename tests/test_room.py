@@ -3,6 +3,7 @@ import io
 import json
 import os
 import sqlite3
+import subprocess
 import stat
 import sys
 import tempfile
@@ -157,7 +158,54 @@ class RoomTests(unittest.TestCase):
             prompt = store.read(repo.room_id)[0]
             self.assertIn("#lane-one #lane-two", prompt["message"])
             self.assertNotIn("@human", prompt["message"])
-            self.assertIn("Confirm ownership, write order, and handoff", prompt["message"])
+            self.assertIn("these branches conflict on", prompt["message"])
+
+    def test_only_real_merge_conflicts_are_reported(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "project"
+            root.mkdir()
+
+            def git(*args):
+                subprocess.run(["git", "-C", str(root), *args], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            git("init", "-q", "-b", "base")
+            git("config", "user.email", "test@example.test")
+            git("config", "user.name", "Test")
+            (root / "shared.txt").write_text("original\n")
+            (root / "untouched.txt").write_text("stable\n")
+            git("add", "."); git("commit", "-qm", "base")
+            git("checkout", "-qb", "one")
+            (root / "shared.txt").write_text("one edits this line\n")
+            git("commit", "-qam", "one")
+            git("checkout", "-q", "base"); git("checkout", "-qb", "two")
+            (root / "shared.txt").write_text("two edits the same line\n")
+            git("commit", "-qam", "two")
+            git("checkout", "-q", "base"); git("checkout", "-qb", "three")
+            (root / "untouched.txt").write_text("three edits a different file\n")
+            git("commit", "-qam", "three")
+
+            repo = room.Repository(root, root, root / ".git", "", "git-local:test", "room-merge", "base", "a" * 40)
+            # Both branches rewrote the same line, so Git reports the collision.
+            self.assertEqual(room.merge_conflict_paths(repo, "one", "two"), {"shared.txt"})
+            # Separate files merge cleanly, which is the ordinary parallel-worktree case.
+            self.assertEqual(room.merge_conflict_paths(repo, "one", "three"), set())
+            self.assertEqual(room.merge_conflict_paths(repo, "one", "one"), set())
+            self.assertEqual(room.merge_conflict_paths(repo, "one", "no-such-branch"), set())
+
+    def test_injected_context_only_carries_unseen_messages(self):
+        repo = self.repo()
+        worktrees = [{"target": "#lane", "name": "lane", "path": str(repo.worktree), "branch": "lane"}]
+        with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store, mock.patch.object(room, "list_worktree_references", return_value=worktrees):
+            store.upsert_presence(repo, "session:one", "one", None, "claude:lane", "online", "SessionStart")
+            store.post(repo, "@human", "message", "general", "posted", "first note", [])
+            first = room.compact_context(store, repo, "session:one", "UserPromptSubmit")
+            self.assertIn("first note", first)
+            # The same hook firing again must not replay what was already delivered.
+            self.assertNotIn("first note", room.compact_context(store, repo, "session:one", "UserPromptSubmit"))
+            store.post(repo, "@human", "message", "general", "posted", "second note", [])
+            later = room.compact_context(store, repo, "session:one", "UserPromptSubmit")
+            self.assertIn("second note", later)
+            self.assertNotIn("first note", later)
 
     def test_human_loop_and_agent_chatter_share_one_durable_thread_store(self):
         repo = self.repo()

@@ -25,7 +25,7 @@ import threading
 import time
 import webbrowser
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -36,7 +36,7 @@ from urllib.request import Request, urlopen
 
 PLUGIN_NAME = "chat-room"
 VERSION = "0.5.1"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 ACTIVE_WINDOW_SECONDS = 30 * 60
 WAKE_ENDPOINT_ENV = "CHAT_ROOM_WAKE_ENDPOINT"
 CLIENT_ENV = "CHAT_ROOM_CLIENT"
@@ -45,7 +45,7 @@ MESSAGE_KINDS = (
     "allocation", "request", "decision", "observation", "update",
     "blocker", "defect", "handoff", "authority", "proposal", "message",
 )
-CONTEXT_EVENTS = ("SessionStart", "UserPromptSubmit", "SubagentStart", "PostToolUse")
+CONTEXT_EVENTS = ("SessionStart", "UserPromptSubmit", "SubagentStart")
 SECRET_PATTERNS = (
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"\b(?:glpat|ghp|github_pat)_[A-Za-z0-9_-]{12,}\b"),
@@ -68,6 +68,10 @@ MAX_CHAT_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_CHAT_IMAGES = 5
 IMAGE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif"}
 CONFLICT_SCAN_TTL_SECONDS = 30
+MAX_CONFLICT_PROBES = 40
+# ponytail: the browser re-fetches this on every change signal, so it is a window, not
+# the archive. Raise it, or page the room log, if a room ever needs deeper scrollback.
+SNAPSHOT_MESSAGE_LIMIT = 300
 CONFLICT_SCAN_LOCK = threading.Lock()
 CONFLICT_SCANS: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
 CONFLICT_SCANS_RUNNING: Set[str] = set()
@@ -400,16 +404,50 @@ def changed_worktree_paths(path: Path) -> Set[str]:
     return {entry[3:] for entry in result.stdout.split("\0") if len(entry) > 3 and entry[2] == " "}
 
 
-def scan_preemptive_conflicts(repo: Repository) -> None:
-    by_path: Dict[str, List[Dict[str, Any]]] = {}
+def merge_conflict_paths(repo: Repository, left: str, right: str) -> Set[str]:
+    """Paths Git reports as conflicting when the two branches are merged."""
+    if not left or not right or left == right:
+        return set()
     try:
-        for worktree in list_worktree_references(repo):
-            path = Path(str(worktree["path"]))
-            if not path.exists():
-                continue
-            for changed in changed_worktree_paths(path):
-                by_path.setdefault(changed, []).append(worktree)
-        conflicts = [{"path": path, "worktrees": worktrees} for path, worktrees in by_path.items() if len(worktrees) > 1]
+        result = subprocess.run(
+            ["git", "-C", str(repo.worktree), "merge-tree", "--write-tree", "--name-only", left, right],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    if result.returncode != 1:
+        # 0 merges cleanly; anything above 1 is an unusable ref or unrelated history.
+        return set()
+    conflicted: Set[str] = set()
+    for line in result.stdout.splitlines()[1:]:
+        if not line.strip():
+            break
+        conflicted.add(line)
+    return conflicted
+
+
+def scan_preemptive_conflicts(repo: Repository) -> None:
+    try:
+        worktrees = [item for item in list_worktree_references(repo) if Path(str(item["path"])).exists()]
+        dirty = {str(item["path"]): changed_worktree_paths(Path(str(item["path"]))) for item in worktrees}
+        # ponytail: separate worktrees are separate checkouts, so two of them holding the
+        # same relative path is the normal workflow, not a conflict. Shared dirty paths only
+        # nominate a pair; Git decides whether the branches actually collide. Probes are
+        # capped because the pairing is O(n^2) — raise MAX_CONFLICT_PROBES if a large project
+        # starts missing pairs, or key the cache on branch heads to skip unchanged pairs.
+        by_path: Dict[str, List[Dict[str, Any]]] = {}
+        probes = 0
+        for index, left in enumerate(worktrees):
+            for right in worktrees[index + 1:]:
+                if probes >= MAX_CONFLICT_PROBES:
+                    break
+                if not dirty[str(left["path"])] & dirty[str(right["path"])]:
+                    continue
+                probes += 1
+                for value in merge_conflict_paths(repo, str(left.get("branch") or ""), str(right.get("branch") or "")):
+                    group = by_path.setdefault(value, [])
+                    group.extend(item for item in (left, right) if item not in group)
+        conflicts = [{"path": path, "worktrees": worktrees_for} for path, worktrees_for in by_path.items()]
         with CONFLICT_SCAN_LOCK:
             CONFLICT_SCANS[repo.room_id] = (time.monotonic(), conflicts)
     finally:
@@ -738,7 +776,7 @@ class RoomStore:
         CREATE TABLE IF NOT EXISTS rooms(room_id TEXT PRIMARY KEY,project_identity TEXT NOT NULL,common_dir TEXT NOT NULL,repository_root TEXT NOT NULL,created_at TEXT NOT NULL,last_seen_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT,room_id TEXT NOT NULL,timestamp TEXT NOT NULL,session_id TEXT,sender TEXT NOT NULL,recipients_json TEXT NOT NULL,kind TEXT NOT NULL,topic TEXT NOT NULL,status TEXT NOT NULL,message TEXT NOT NULL,cwd TEXT,worktree TEXT,branch TEXT,head TEXT,metadata_json TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS messages_room_id_id ON messages(room_id,id);
-        CREATE TABLE IF NOT EXISTS presence(room_id TEXT NOT NULL,participant_id TEXT NOT NULL,session_id TEXT,agent_id TEXT,role TEXT NOT NULL,state TEXT NOT NULL,cwd TEXT NOT NULL,worktree TEXT NOT NULL,branch TEXT,head TEXT,started_at TEXT NOT NULL,seen_at TEXT NOT NULL,last_event TEXT NOT NULL,handle TEXT,wake_endpoint TEXT,PRIMARY KEY(room_id,participant_id));
+        CREATE TABLE IF NOT EXISTS presence(room_id TEXT NOT NULL,participant_id TEXT NOT NULL,session_id TEXT,agent_id TEXT,role TEXT NOT NULL,state TEXT NOT NULL,cwd TEXT NOT NULL,worktree TEXT NOT NULL,branch TEXT,head TEXT,started_at TEXT NOT NULL,seen_at TEXT NOT NULL,last_event TEXT NOT NULL,handle TEXT,wake_endpoint TEXT,claimed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(room_id,participant_id));
         CREATE TABLE IF NOT EXISTS cursors(room_id TEXT NOT NULL,participant_id TEXT NOT NULL,last_message_id INTEGER NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(room_id,participant_id));
         CREATE TABLE IF NOT EXISTS threads(id TEXT PRIMARY KEY,room_id TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,status TEXT NOT NULL,title TEXT NOT NULL,reason TEXT NOT NULL,opener TEXT NOT NULL,participants_json TEXT NOT NULL,paths_json TEXT NOT NULL,source TEXT NOT NULL,metadata_json TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS threads_room_status_updated ON threads(room_id,status,updated_at DESC);
@@ -748,9 +786,18 @@ class RoomStore:
             ("worktree_action", "investigate", "Investigate unmerged work", {"order": 10, "prompt": "Inspect the referenced worktree or conflict, report unique unmerged work and evidence, and recommend a safe disposition. Do not mutate Git."}),
             ("worktree_action", "consolidate", "Consolidate", {"order": 20, "prompt": "Compare the referenced work against current authority, identify the smallest consumer-closed consolidation, and report the exact safe sequence before changing Git."}),
             ("worktree_action", "delete", "Delete after proof", {"order": 30, "prompt": "Prove the referenced work has no unique reachable value and report a recoverable deletion plan. Do not delete until the human explicitly approves the exact targets."}),
-            ("notification_policy", "stale_worktree_days", "2", {"label": "Potentially stale after days"}),
+            ("notification_policy", "stale_worktree_days", "30", {"label": "Potentially stale after days"}),
         )
         self.connection.executemany("INSERT OR IGNORE INTO option_index VALUES(?,?,?,?)", [(namespace, key, value, json.dumps(metadata, sort_keys=True)) for namespace, key, value, metadata in defaults])
+        row = self.connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
+        installed = int(str(row["value"])) if row and str(row["value"]).isdigit() else 0
+        if installed < 5:
+            try:
+                self.connection.execute("ALTER TABLE presence ADD COLUMN claimed INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
+            # Schema 4 seeded 2 days, contradicting the documented and displayed 30.
+            self.connection.execute("UPDATE option_index SET value='30' WHERE namespace='notification_policy' AND key='stale_worktree_days' AND value='2'")
         self.connection.execute("INSERT OR REPLACE INTO metadata VALUES('schema_version',?)", (str(SCHEMA_VERSION),))
         self.connection.commit()
 
@@ -820,13 +867,27 @@ class RoomStore:
         row = self.connection.execute("SELECT repository_root FROM rooms ORDER BY last_seen_at DESC LIMIT 1").fetchone()
         return resolve_repository(row["repository_root"]) if row else None
 
+    def unique_handle(self, room_id: str, participant_id: str, preferred: str) -> str:
+        """Settle a handle at write time so a target never moves between sessions."""
+        rows = self.connection.execute("SELECT handle FROM presence WHERE room_id=? AND participant_id<>? AND state<>'offline'", (room_id, participant_id)).fetchall()
+        if preferred not in {str(row["handle"]) for row in rows}:
+            return preferred
+        return f"{preferred}-{hashlib.sha256(participant_id.encode()).hexdigest()[:6]}"
+
     def upsert_presence(self, repo: Repository, participant_id: str, session_id: Optional[str], agent_id: Optional[str], role: str, state: str, event: str, wake_endpoint: Optional[str] = None) -> None:
         self.register_room(repo)
         now = utc_now()
-        previous = self.connection.execute("SELECT handle,started_at FROM presence WHERE room_id=? AND participant_id=?", (repo.room_id, participant_id)).fetchone()
-        handle = str(previous["handle"]) if previous and previous["handle"] else slug(role.replace(":", "-"), "agent")
+        previous = self.connection.execute("SELECT handle,started_at,claimed FROM presence WHERE room_id=? AND participant_id=?", (repo.room_id, participant_id)).fetchone()
+        claimed = bool(previous and previous["claimed"])
+        if claimed:
+            handle = str(previous["handle"])
+        else:
+            # A generated handle follows its role, so a session that moves worktree stops
+            # advertising the old one. Uniqueness is settled here, never at read time.
+            handle = self.unique_handle(repo.room_id, participant_id, slug(role.replace(":", "-"), "agent"))
         started = str(previous["started_at"]) if previous else now
-        self.connection.execute("""INSERT INTO presence VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(room_id,participant_id) DO UPDATE SET session_id=excluded.session_id,agent_id=excluded.agent_id,role=excluded.role,state=excluded.state,cwd=excluded.cwd,worktree=excluded.worktree,branch=excluded.branch,head=excluded.head,seen_at=excluded.seen_at,last_event=excluded.last_event,wake_endpoint=excluded.wake_endpoint""", (repo.room_id, participant_id, session_id, agent_id, role, state, str(repo.cwd), str(repo.worktree), repo.branch, repo.head, started, now, event, handle, wake_endpoint))
+        self.connection.execute("""INSERT INTO presence VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(room_id,participant_id) DO UPDATE SET session_id=excluded.session_id,agent_id=excluded.agent_id,role=excluded.role,state=excluded.state,cwd=excluded.cwd,worktree=excluded.worktree,branch=excluded.branch,head=excluded.head,seen_at=excluded.seen_at,last_event=excluded.last_event,handle=excluded.handle,wake_endpoint=excluded.wake_endpoint""", (repo.room_id, participant_id, session_id, agent_id, role, state, str(repo.cwd), str(repo.worktree), repo.branch, repo.head, started, now, event, handle, wake_endpoint, int(claimed)))
+        self.connection.execute("DELETE FROM presence WHERE room_id=? AND state='offline' AND seen_at<?", (repo.room_id, (datetime.now(timezone.utc) - timedelta(days=1)).replace(microsecond=0).isoformat().replace("+00:00", "Z")))
         self.connection.commit()
 
     def members(self, room_id: str) -> List[Dict[str, Any]]:
@@ -840,15 +901,6 @@ class RoomStore:
             value["worktree_target"] = worktree_target(Path(value["worktree"]))
             value["wakeable_idle"] = bool(value["state"] in ("online", "idle") and endpoint_live and value.get("last_event") == "Stop" and str(value.get("role", "")).startswith("codex:"))
             result.append(value)
-        seen: Set[str] = set()
-        for value in result:
-            if value["state"] == "offline":
-                continue
-            target = str(value["target"])
-            if target in seen:
-                suffix = hashlib.sha256(str(value["participant_id"]).encode()).hexdigest()[:6]
-                value["target"] = f"{target}-{suffix}"
-            seen.add(str(value["target"]))
         return result
 
     def claim_handle(self, repo: Repository, session_ref: str, requested: str) -> Dict[str, Any]:
@@ -857,7 +909,7 @@ class RoomStore:
         matches = [m for m in active if str(m.get("session_id") or "").startswith(session_ref) or str(m["participant_id"]).startswith(session_ref)]
         if len(matches) != 1: raise RoomError("session reference must match exactly one active session")
         if any(m["target"] == "@" + handle and m["participant_id"] != matches[0]["participant_id"] for m in active): raise RoomError(f"@{handle} is already active")
-        self.connection.execute("UPDATE presence SET handle=?,seen_at=? WHERE room_id=? AND participant_id=?", (handle, utc_now(), repo.room_id, matches[0]["participant_id"]))
+        self.connection.execute("UPDATE presence SET handle=?,claimed=1,seen_at=? WHERE room_id=? AND participant_id=?", (handle, utc_now(), repo.room_id, matches[0]["participant_id"]))
         self.connection.commit()
         return next(m for m in self.members(repo.room_id) if m["participant_id"] == matches[0]["participant_id"])
 
@@ -967,8 +1019,8 @@ class RoomStore:
             thread_id = "conflict-" + digest
             active_ids.add(thread_id)
             prompted = self.connection.execute("SELECT 1 FROM messages WHERE room_id=? AND topic=? AND sender='@chat-room' LIMIT 1", (repo.room_id, f"thread:{thread_id}")).fetchone() is not None
-            title = f"Potential conflict: {paths[0]}" if len(paths) == 1 else f"Potential conflict: {len(paths)} files"
-            self.open_thread(repo, title, "preemptive file overlap", "@chat-room", participants, paths, "preemptive-conflict", thread_id, {"audience": "agents", "origin": "observed overlap"})
+            title = f"Merge conflict: {paths[0]}" if len(paths) == 1 else f"Merge conflict: {len(paths)} files"
+            self.open_thread(repo, title, "branches do not merge cleanly", "@chat-room", participants, paths, "preemptive-conflict", thread_id, {"audience": "agents", "origin": "git merge-tree"})
             if not prompted:
                 tags = " ".join(dict.fromkeys(participants))
                 path_summary = ", ".join(paths[:3]) + (f" and {len(paths) - 3} more" if len(paths) > 3 else "")
@@ -976,7 +1028,7 @@ class RoomStore:
                     repo,
                     thread_id,
                     "@chat-room",
-                    f"{tags} coordination suggested for {path_summary}. Confirm ownership, write order, and handoff in agent chatter before another write.",
+                    f"{tags} these branches conflict on {path_summary}. Git reports the collision today; agree who rebases and in what order before the merge.",
                 )
         open_auto = self.connection.execute("SELECT id FROM threads WHERE room_id=? AND status='open' AND source='preemptive-conflict'", (repo.room_id,)).fetchall()
         stale = [str(row["id"]) for row in open_auto if str(row["id"]) not in active_ids]
@@ -1010,6 +1062,14 @@ class RoomStore:
         row = self.connection.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
         if row is None: raise RoomError("message does not exist")
         return message_from_row(row)
+
+    def context_cursor(self, room_id: str, participant_id: str) -> int:
+        row = self.connection.execute("SELECT last_message_id FROM cursors WHERE room_id=? AND participant_id=?", (room_id, participant_id)).fetchone()
+        return int(row["last_message_id"]) if row else 0
+
+    def advance_cursor(self, room_id: str, participant_id: str, message_id: int) -> None:
+        self.connection.execute("INSERT INTO cursors VALUES(?,?,?,?) ON CONFLICT(room_id,participant_id) DO UPDATE SET last_message_id=excluded.last_message_id,updated_at=excluded.updated_at", (room_id, participant_id, int(message_id), utc_now()))
+        self.connection.commit()
 
     def read(self, room_id: str, after_id: int = 0, limit: int = 50) -> List[Dict[str, Any]]:
         rows = self.connection.execute("SELECT * FROM messages WHERE room_id=? AND id>? ORDER BY id ASC LIMIT ?", (room_id, max(0, int(after_id)), max(1, min(100, int(limit))))).fetchall()
@@ -1060,10 +1120,15 @@ def compact_context(store: RoomStore, repo: Repository, participant_id: str, eve
     member = next((m for m in store.members(repo.room_id) if m["participant_id"] == participant_id), None)
     if member is None: return ""
     targets = {member["target"], member["worktree_target"]}
-    messages = [m for m in store.recent(repo.room_id, 30) if not m["recipients"] or targets.intersection(m["recipients"])][-10:]
+    # Only what this participant has not been shown yet; the cursor advances past
+    # everything examined so an unaddressed message is not re-scanned forever.
+    incoming = store.read(repo.room_id, store.context_cursor(repo.room_id, participant_id), 100)
+    messages = [m for m in incoming if not m["recipients"] or targets.intersection(m["recipients"])][-10:]
+    if incoming:
+        store.advance_cursor(repo.room_id, participant_id, incoming[-1]["id"])
     lines = [f"Chat Room (advisory): room={repo.room_id} handle={member['target']} worktree={member['worktree_target']} branch={repo.branch or 'detached'}.", "Use room tools for material coordination. Re-observe repository state before acting."]
     if messages:
-        lines.append("Recent room messages:")
+        lines.append("New room messages:")
         lines.extend(f"[{m['id']}] {m['kind']} {m['sender']} -> {','.join(m['recipients']) or 'room'} [{m['topic']}]: {m['message']}" for m in messages)
     elif event != "SessionStart":
         return ""
@@ -1182,13 +1247,14 @@ class RoomHandler(BaseHTTPRequestHandler):
         if not self.valid_host(): self.send_error(HTTPStatus.MISDIRECTED_REQUEST); return
         parsed = urlparse(self.path); path = parsed.path
         if path == "/api/snapshot":
+            if not self.authorized(): self.send_json({"error": "invalid local token"}, 403); return
             with RoomStore(self.app.data_dir) as store:
                 threads = store.sync_preemptive_conflicts(self.app.repo)
                 targets = store.targets(self.app.repo)
                 options = store.options()
                 status = store.status(self.app.repo)
                 status["display_name"] = store.display_name("room_name", self.app.repo.room_id, self.app.repo.worktree.name or "Chat Room")
-                self.send_json({"status": status, "messages": store.recent(self.app.repo.room_id, 2000), "targets": targets, "threads": threads, "alerts": coordination_alerts(targets, threads, options), "options": options, "events_url": f"ws://{self.app.hostname}:{self.app.events_port}/events"})
+                self.send_json({"status": status, "messages": store.recent(self.app.repo.room_id, SNAPSHOT_MESSAGE_LIMIT), "targets": targets, "threads": threads, "alerts": coordination_alerts(targets, threads, options), "options": options, "events_url": f"ws://{self.app.hostname}:{self.app.events_port}/events"})
             return
         if path == "/api/chats":
             if not self.authorized(): self.send_json({"error": "invalid local token"}, 403); return
