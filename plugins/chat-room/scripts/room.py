@@ -1085,6 +1085,42 @@ class RoomStore:
             "branches": branches,
         }
 
+    def projects(self, current: Optional[Repository] = None) -> Dict[str, Any]:
+        """Every project this machine has a room for, with its worktrees grouped under it.
+
+        One room covers one Git project, so running two projects means two rooms and, until
+        now, no way to see both at once. Rooms whose checkout has moved or been removed are
+        reported as unreachable rather than quietly dropped, because a stale room is exactly
+        the kind of thing that is invisible until it confuses someone.
+        """
+        rows = self.connection.execute("SELECT room_id,project_identity,repository_root,last_seen_at FROM rooms ORDER BY last_seen_at DESC").fetchall()
+        found: List[Dict[str, Any]] = []
+        for row in rows:
+            room_id = str(row["room_id"])
+            repo = resolve_repository(str(row["repository_root"]))
+            entry: Dict[str, Any] = {
+                "room_id": room_id, "project": str(row["project_identity"]),
+                "root": str(row["repository_root"]), "last_seen_at": str(row["last_seen_at"]),
+                "current": bool(current and current.room_id == room_id),
+            }
+            if repo is None or repo.room_id != room_id:
+                entry.update(reachable=False, worktrees=[], active_agents=0)
+                found.append(entry)
+                continue
+            agents = [m for m in self.members(room_id) if m["state"] != "offline"]
+            entry.update(
+                reachable=True,
+                active_agents=len(agents),
+                blocked_agents=sum(1 for m in agents if m["state"] == "blocked"),
+                worktrees=[
+                    {"target": str(item["target"]), "branch": item.get("branch"),
+                     "agents": sum(Path(m["worktree"]).resolve() == Path(item["path"]).resolve() for m in agents)}
+                    for item in list_worktree_references(repo)
+                ],
+            )
+            found.append(entry)
+        return {"projects": found, "reachable": sum(1 for item in found if item["reachable"])}
+
     def allowed_targets(self, repo: Repository) -> Set[str]:
         allowed = {"@human"}
         allowed.update(m["target"] for m in self.members(repo.room_id) if m["state"] != "offline")
@@ -1391,6 +1427,7 @@ def tool_definitions() -> List[Dict[str, Any]]:
         {"name": "room_session_start", "description": "Open new agent work in a worktree of this project. Starts one local vendor CLI session; that session bills vendor tokens.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "client": {"type": "string", "enum": ["claude", "codex"]}, "worktree": {"type": "string", "description": "Absolute worktree path; defaults to the current one."}, "prompt": {"type": "string", "maxLength": 4000}}, "required": ["client", "prompt"]}},
         {"name": "room_session_stop", "description": "Interrupt a local turn this room started for a session.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "client": {"type": "string", "enum": ["claude", "codex"]}, "session_id": {"type": "string"}}, "required": ["client", "session_id"]}},
         {"name": "room_ready", "description": "Report which worktree branches merge cleanly into the integration branch and which collide, before a merge is attempted.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "into": {"type": "string", "description": "Integration branch; defaults to main."}}}},
+        {"name": "room_projects", "description": "List every project with a room on this machine, with its worktrees and active agents grouped under it.", "inputSchema": {"type": "object", "properties": {"cwd": cwd}}},
         {"name": "room_spend", "description": "Report token spend per worktree beside the commits it produced, so cost is comparable rather than raw.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "days": {"type": "integer", "minimum": 1, "maximum": 90}}}},
         {"name": "room_search", "description": "Search this room's message history, or indexed local CLI transcripts, beyond the recent window.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "query": {"type": "string"}, "scope": {"type": "string", "enum": ["room", "chats"]}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}}, "required": ["query"]}},
         {"name": "room_handoff", "description": "Post a structured handoff with source, paths, proof, blocker, and next owner.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "sender": {"type": "string"}, "session_id": {"type": "string"}, "topic": {"type": "string"}, "source_sha": {"type": "string"}, "paths": {"type": "array", "items": {"type": "string"}}, "proof": {"type": "string"}, "blocker": {"type": "string"}, "next_owner": {"type": "string"}}, "required": ["topic", "source_sha", "paths", "proof", "next_owner"]}},
@@ -1426,6 +1463,8 @@ def execute_tool(store: RoomStore, name: str, args: Dict[str, Any]) -> Any:
         return stop_delivery(str(args["client"]), str(args["session_id"]))
     if name == "room_ready":
         return store.merge_readiness(repo, str(args.get("into") or ""))
+    if name == "room_projects":
+        return store.projects(repo)
     if name == "room_spend":
         return spend_report(store.data_dir, repo, int(args.get("days", 7)))
     if name == "room_search":
@@ -1992,6 +2031,7 @@ def parser() -> argparse.ArgumentParser:
     search = sub.add_parser("search"); search.add_argument("--cwd"); search.add_argument("--query", required=True); search.add_argument("--limit", type=int, default=100); search.add_argument("--scope", choices=("room", "chats"), default="room")
     index = sub.add_parser("index"); index.add_argument("--cwd")
     ready = sub.add_parser("ready"); ready.add_argument("--cwd"); ready.add_argument("--into")
+    sub.add_parser("projects").add_argument("--cwd")
     spend = sub.add_parser("spend"); spend.add_argument("--cwd"); spend.add_argument("--days", type=int, default=7)
     identify = sub.add_parser("identify"); identify.add_argument("--cwd"); identify.add_argument("--session", required=True); identify.add_argument("--handle", required=True)
     thread_open = sub.add_parser("thread-open"); thread_open.add_argument("--cwd"); thread_open.add_argument("--title", required=True); thread_open.add_argument("--reason", default="coordination"); thread_open.add_argument("--audience", choices=("agents", "human-loop"), default="agents"); thread_open.add_argument("--origin", default="human"); thread_open.add_argument("--lifetime", choices=("durable", "temporary"), default="durable"); thread_open.add_argument("--participant", action="append", default=[]); thread_open.add_argument("--path", action="append", default=[])
@@ -2034,6 +2074,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             elif args.command == "stop": value = stop_delivery(args.client, args.session)
             elif args.command == "index": value = run_index(args.data_dir, repo)
             elif args.command == "ready": value = store.merge_readiness(repo, args.into)
+            elif args.command == "projects": value = store.projects(repo)
             elif args.command == "spend": value = spend_report(args.data_dir, repo, args.days)
             elif args.command == "search":
                 if args.scope == "chats": value = {"room_id": repo.room_id, "turns": search_transcripts(args.data_dir, args.query, args.limit)}

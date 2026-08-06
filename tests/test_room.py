@@ -201,6 +201,30 @@ class RoomTests(unittest.TestCase):
         git("checkout", "-q", "base")
         return root
 
+    def test_projects_groups_worktrees_and_flags_a_room_whose_checkout_is_gone(self):
+        # One room covers one project, so two projects mean two rooms. A room whose checkout
+        # moved is reported, not dropped — a stale room is invisible until it confuses someone.
+        root = self.repo_with_branches({"lane": ("other.txt", "base\nlane\n")})
+        repo = room.resolve_repository(str(root))
+        with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store:
+            store.register_room(repo)
+            store.connection.execute(
+                "INSERT INTO rooms(room_id,project_identity,common_dir,repository_root,created_at,last_seen_at)"
+                " VALUES('gone','git:example.test/removed','/gone/.git','/gone',?,?)",
+                (room.utc_now(), room.utc_now()))
+            store.connection.commit()
+            with mock.patch.object(room, "list_worktree_references", return_value=[{"target": "#lane", "name": "lane", "path": str(root), "branch": "lane"}]):
+                report = store.projects(repo)
+
+        by_project = {item["project"]: item for item in report["projects"]}
+        self.assertEqual(report["reachable"], 1)
+        live = by_project[repo.project_identity]
+        self.assertTrue(live["current"] and live["reachable"])
+        self.assertEqual([w["target"] for w in live["worktrees"]], ["#lane"])
+        missing = by_project["git:example.test/removed"]
+        self.assertFalse(missing["reachable"])
+        self.assertEqual(missing["worktrees"], [])
+
     def test_readiness_reports_branches_that_only_collide_with_each_other(self):
         # Two branches can each merge cleanly into the target and still collide the moment
         # either one lands — two additions at the same place read as independent until they
