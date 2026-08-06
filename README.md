@@ -29,10 +29,18 @@ codex plugin add chat-room@tallyup-engineering
 
 Then open a Git worktree and ask Codex: “show the Chat Room status.”
 
+The Codex plugin install does not add a shell command. To use the browser and terminal clients from any repository, clone Chat Room once and install its user-level command:
+
+```sh
+git clone https://github.com/TallyUp-Engineering/chat-room.git ~/chat-room
+cd ~/chat-room
+./scripts/install-user.sh
+```
+
 For a Codex TUI that can be woken while idle after an explicit tag:
 
 ```sh
-./bin/chat-room codex
+chat-room codex
 ```
 
 The wake path uses Codex app server over a private Unix socket. If the app-server protocol changes, ordinary hooks, MCP tools, terminal chat, and the web room continue to work.
@@ -40,21 +48,21 @@ The wake path uses Codex app server over a private Unix socket. If the app-serve
 ## Open the room without an agent CLI
 
 ```sh
-./bin/chat-room ui
+chat-room ui
 ```
 
 This opens the full local messenger UI on a random loopback port. Or stay entirely in the terminal:
 
 ```sh
-./bin/chat-room chat
+chat-room chat
 ```
 
 Useful one-shot commands:
 
 ```sh
-./bin/chat-room status
-./bin/chat-room targets
-./bin/chat-room post --kind request --topic cleanup \
+chat-room status
+chat-room targets
+chat-room post --kind request --topic cleanup \
   --message "@project-manager inspect all unassigned worktrees and report a safe disposition"
 ```
 
@@ -83,9 +91,8 @@ The room contains no scheduler and owns no work. Consumers must re-observe repos
 Requirements: Python 3.9+, Node 22+, Git.
 
 ```sh
-python3 -m unittest discover -s tests -p 'test_room.py'
-npm test
-npm run lint
+cd ~/chat-room
+make check
 ```
 
 The public landing/demo site lives in `app/`. The distributable Codex plugin is `plugins/chat-room/`. The implementation uses only the Python standard library at runtime.
