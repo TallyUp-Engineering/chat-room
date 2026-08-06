@@ -12,16 +12,18 @@
       <aside class="rooms">
         <details class="nav-section" open>
           <summary><span>Chat Room</span><em id="combined-count">0</em></summary>
+          <div id="active-agents" class="active-agents"><p class="nav-empty">Looking for active agents…</p></div>
           <button id="combined-room" class="conversation active"><span class="conversation-icon">◎</span><span><b>All activity</b><small>Combined room · read</small></span></button>
-        </details>
-
-        <details class="nav-section" open>
-          <summary><span>Alerts</span><em id="alert-count">0</em></summary>
+          <div class="nav-subhead"><span>Needs attention</span><em id="alert-count">0</em></div>
           <div id="alerts"><p class="nav-empty">No coordination alerts.</p></div>
-        </details>
-
-        <details class="nav-section">
-          <summary><span>Threads</span><em id="thread-count">0</em></summary>
+          <form id="alert-router" class="thread-form" hidden>
+            <b id="alert-router-title">Route notification</b>
+            <label>Actor<select id="alert-actor" required></select></label>
+            <label>Action<select id="alert-action" required></select></label>
+            <span><button type="submit">Open coordination chat</button><button id="cancel-alert" type="button">Cancel</button></span>
+            <small>Advisory only: this opens a tagged thread and never changes Git.</small>
+          </form>
+          <div class="nav-subhead"><span>Coordination rooms</span><em id="thread-count">0</em></div>
           <div id="threads"></div>
           <button id="new-thread" class="new-thread" type="button">＋ Open coordination thread</button>
           <form id="thread-form" class="thread-form" hidden>
@@ -39,17 +41,11 @@
           <div id="chats"><p class="nav-empty">Loading local histories…</p></div>
         </details>
 
-        <details class="nav-section">
-          <summary><span>Worktrees</span><em id="worktree-count">0</em></summary>
-          <div id="worktrees"></div>
-          <p class="room-hint">Worktrees are taggable targets, not chat histories.</p>
-        </details>
-
         <p class="authority"><b>Room ≠ authority.</b><br>Git and provider state remain authoritative.</p>
       </aside>
       <section id="chat-pane" class="chat">
-        <header><div><b id="view-title">All activity</b><small id="identity">local Git project · combined room</small></div><div class="view-actions"><button id="close-thread" type="button" hidden>Resolve</button><span id="view-status" class="connected">● connected locally</span></div></header>
-        <div id="messages" class="messages"><p class="notice">Room data stays on this machine. Local chat histories are indexed read-only and never copied into the room database.</p></div>
+        <header><div><b id="view-title">All activity</b><small id="identity">local Git project · combined room</small></div><div class="view-actions"><button id="rename-view" type="button">Rename</button><button id="close-thread" type="button" hidden>Resolve</button><span id="view-status" class="connected">● connected locally</span></div></header>
+        <div id="messages" class="messages"><p class="notice">Room data stays on this machine. Local CLI histories stay vendor-owned and are never copied into the room database.</p></div>
         <p id="error" class="error" hidden></p>
         <form id="composer"><div class="tools"><b>B</b>　<i>I</i>　 @　 #　 <span id="compose-label">message as @human · ad hoc tagging is built in</span></div><div class="compose"><textarea id="message" maxlength="4000" placeholder="Message the combined room. Tag an active @actor or #worktree."></textarea><button>Send</button></div></form>
       </section>

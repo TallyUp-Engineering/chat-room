@@ -77,9 +77,13 @@ class RoomTests(unittest.TestCase):
         script = (assets / "room.js").read_text()
         self.assertIn("All activity", html)
         self.assertIn('id="chats"', html)
-        self.assertIn('id="worktrees"', html)
+        self.assertIn('id="active-agents"', html)
+        self.assertIn('id="alert-router"', html)
+        self.assertNotIn('id="worktrees"', html)
         self.assertIn("openHistory", script)
         self.assertIn("openThread", script)
+        self.assertIn("/api/chat-send", script)
+        self.assertIn("/api/rename", script)
 
     def test_terminal_chat_registers_and_releases_cli_presence(self):
         repo = self.repo()
@@ -112,7 +116,10 @@ class RoomTests(unittest.TestCase):
             threads = store.sync_preemptive_conflicts(repo)
             self.assertEqual(len(threads), 1)
             self.assertEqual(threads[0]["source"], "preemptive-conflict")
-            self.assertEqual(threads[0]["participants"], ["#lane-one", "#lane-two"])
+            self.assertEqual(threads[0]["participants"], ["@human", "#lane-one", "#lane-two"])
+            prompt = store.read(repo.room_id)[0]
+            self.assertIn("@human #lane-one #lane-two", prompt["message"])
+            self.assertIn("Confirm ownership, write order, and handoff", prompt["message"])
 
     def test_coordination_alerts_derive_from_worktree_and_thread_indexes(self):
         targets = {
@@ -147,6 +154,67 @@ class RoomTests(unittest.TestCase):
     def test_chat_recency_defines_recent_and_inactive(self):
         self.assertEqual(room.chat_recency(room.utc_now()), "recent")
         self.assertEqual(room.chat_recency("2000-01-01T00:00:00Z"), "inactive")
+
+    def test_notification_options_are_indexed_and_route_only_to_chat(self):
+        repo = self.repo()
+        worktrees = [{"target": "#lane", "name": "lane", "path": str(repo.worktree), "branch": "lane"}]
+        with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store, mock.patch.object(room, "list_worktree_references", return_value=worktrees):
+            self.assertEqual([item["key"] for item in store.options()["worktree_action"]], ["consolidate", "delete", "investigate"])
+            store.set_option("worktree_action", "archive", "Archive", {"prompt": "Report an archive plan. Do not mutate Git."})
+            store.upsert_presence(repo, "session:one", "one", None, "codex:lane", "online", "Stop")
+            store.claim_handle(repo, "one", "worker")
+            thread = store.route_notification(repo, "Potentially stale lane", "stale-worktrees", "@worker", "archive", ["#lane"], [str(repo.worktree)])
+            self.assertEqual(thread["source"], "notification-route")
+            self.assertEqual(thread["participants"], ["@human", "@worker", "#lane"])
+            self.assertIn("Do not mutate Git", store.read(repo.room_id)[0]["message"])
+
+    def test_stale_worktrees_are_typed_notifications(self):
+        targets = {"agents": [], "worktrees": [{"target": "#old", "path": "/project/old", "active_agents": 0, "age_days": 45}]}
+        options = {"notification_policy": [{"key": "stale_worktree_days", "value": "30", "metadata": {}}]}
+        alerts = room.coordination_alerts(targets, [], options)
+        self.assertEqual(alerts[0]["type"], "stale-worktrees")
+        self.assertEqual(alerts[0]["thread_id"], None)
+
+    def test_dormant_chat_delivery_uses_installed_cli_adapter(self):
+        summary = {"client": "Codex", "id": "session-a"}
+        with mock.patch.object(room.shutil, "which", return_value="/usr/local/bin/codex"):
+            state = room.chat_delivery_state(summary, [])
+        self.assertTrue(state["ready"])
+        self.assertEqual(state["mode"], "resume")
+        active = [{"session_id": "session-a", "state": "online", "last_event": "PostToolUse", "wake_endpoint": None}]
+        state = room.chat_delivery_state(summary, active)
+        self.assertFalse(state["ready"])
+        self.assertEqual(state["mode"], "active-unattached")
+
+    def test_chat_delivery_passes_prompt_on_stdin_not_process_arguments(self):
+        repo = self.repo()
+        prompt = "inspect the focused tests"
+        class Sink:
+            def __init__(self): self.value = b""
+            def write(self, value): self.value += value
+            def close(self): return None
+        process = mock.Mock(pid=42, stdin=Sink())
+        process.poll.return_value = None
+        summary = {"client": "Codex", "id": "session-a", "cwd": "/project/lane", "worktree": "lane"}
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(room, "discover_chat_catalog", return_value=([summary], {})), mock.patch.object(room, "path_belongs_to_room", return_value=True), mock.patch.object(room.shutil, "which", return_value="/usr/local/bin/codex"), mock.patch.object(room.subprocess, "Popen", return_value=process) as popen:
+            value = room.start_chat_delivery(Path(temp), repo, "Codex", "session-a", prompt, [])
+        command = popen.call_args.args[0]
+        self.assertNotIn(prompt, command)
+        self.assertEqual(command[-1], "-")
+        self.assertEqual(process.stdin.value, (prompt + "\n").encode())
+        self.assertEqual(value["status"], "started")
+        room.CHAT_DELIVERIES.clear()
+
+    def test_room_and_chat_renames_are_local_index_overlays(self):
+        repo = self.repo()
+        summary = {"client": "Codex", "id": "session-a"}
+        with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store:
+            renamed = store.rename(repo, "room", repo.room_id, "Release room")
+            self.assertEqual(renamed["label"], "Release room")
+            self.assertEqual(store.display_name("room_name", repo.room_id, "fallback"), "Release room")
+            with mock.patch.object(room, "discover_chat_catalog", return_value=([summary], {})):
+                store.rename(repo, "chat", "session-a", "Compiler cleanup", "Codex")
+            self.assertEqual(store.display_name("chat_name", "Codex-session-a", "fallback"), "Compiler cleanup")
 
 
 if __name__ == "__main__": unittest.main()

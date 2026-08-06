@@ -15,7 +15,7 @@ const initialMessages: RoomMessage[] = [
   { id: 2, sender: "@project-manager", time: "9:41 AM", kind: "allocation", body: "@api-agent take the auth regression. @ui-agent keep the room shippable." },
   { id: 3, sender: "@api-agent", time: "9:43 AM", kind: "update", body: "Reproduced on #auth-fix. The failing boundary is isolated; writing the negative proof now." },
   { id: 4, sender: "@ui-agent", time: "9:45 AM", kind: "handoff", body: "The room shell is ready. source=7c82a1e; proof=responsive build; next_owner=@project-manager" },
-  { id: 5, sender: "@human", time: "9:47 AM", kind: "request", body: "@project-manager please prune all unassigned worktrees after you re-observe their state." },
+  { id: 5, sender: "@human", time: "9:47 AM", kind: "request", body: "@project-manager investigate the potentially stale worktree and report any unique unmerged work." },
 ];
 
 const buddyGroups = [
@@ -30,7 +30,6 @@ const localChatGroups = [
 ];
 
 const coordinationThreads = [["Potential conflict: app/ui.tsx", "2 worktrees · 3 actors"], ["Choose navigation direction", "design direction · @human"]];
-const worktreeTargets = ["#release-train", "#room-interface", "#auth-fix"];
 
 function highlight(value: string) {
   const pieces = value.split(/(@[a-z0-9-]+|#[a-z0-9-]+)/gi);
@@ -46,6 +45,11 @@ export function ChatRoom() {
   const [selectedBuddy, setSelectedBuddy] = useState("@project-manager");
   const nextId = useRef(10);
   const unread = useMemo(() => messages.length, [messages.length]);
+
+  function renameCurrent() {
+    const label = window.prompt("Rename this local room or chat label", room);
+    if (label?.trim()) setRoom(label.trim());
+  }
 
   function send(event: FormEvent) {
     event.preventDefault();
@@ -77,22 +81,21 @@ export function ChatRoom() {
           <div className="menu-bar"><span>Room</span><span>People</span><span>Actions</span><span>Help</span></div>
           <div className="room-layout">
             <aside className="rail">
-              <details className="nav-section" open><summary><span>Chat Room</span><b>{unread}</b></summary><button className={`room-item combined ${viewKind === "room" ? "active" : ""}`} onClick={() => { setRoom("All activity"); setViewKind("room"); }}><span className="combined-icon">◎</span><span><strong>All activity</strong><small>Combined room · read</small></span></button>{coordinationThreads.map(([title, detail]) => <button className={`room-item thread-item ${room === title ? "selected" : ""}`} key={title} onClick={() => { setRoom(title); setViewKind("thread"); }}><span className="thread-icon">↔</span><span><strong>{title}</strong><small>{detail}</small></span></button>)}<button className="add-interface" type="button">＋ Open coordination thread</button></details>
+              <details className="nav-section" open><summary><span>Chat Room</span><b>{unread}</b></summary><div className="active-strip"><button onClick={() => setDraft("@project-manager ")}><span className="presence-dot"/>@project-manager</button><button onClick={() => setDraft("@ui-agent ")}><span className="presence-dot"/>@ui-agent</button><button onClick={() => setDraft("@api-agent ")}><span className="presence-dot idle"/>@api-agent</button></div><button className={`room-item combined ${viewKind === "room" ? "active" : ""}`} onClick={() => { setRoom("All activity"); setViewKind("room"); }}><span className="combined-icon">◎</span><span><strong>All activity</strong><small>Combined room · read</small></span></button><div className="rail-subhead">Needs attention</div><button className="notification" onClick={() => { setRoom("Potentially stale worktree"); setViewKind("thread"); }}><span>!</span><span><strong>Potentially stale worktree</strong><small>Choose actor + indexed action · Route</small></span></button><div className="rail-subhead">Coordination rooms</div>{coordinationThreads.map(([title, detail]) => <button className={`room-item thread-item ${room === title ? "selected" : ""}`} key={title} onClick={() => { setRoom(title); setViewKind("thread"); }}><span className="thread-icon">#</span><span><strong>{title}</strong><small>{detail}</small></span></button>)}<button className="add-interface" type="button">＋ Open coordination room</button></details>
               <details className="nav-section" open><summary><span>Chats</span><b>5</b></summary>{localChatGroups.map((group) => <div className="interface-group" key={group.label}><div className="interface-title"><span>{group.label}</span><b>{group.chats.length}</b></div>{group.chats.map(([name, detail]) => <button className={`room-item session ${room === name ? "selected" : ""}`} key={`${group.label}-${name}`} onClick={() => { setRoom(name); setViewKind("history"); }}><span className="history-icon">{group.label[0]}</span><span><strong>{name}</strong><small>{detail}</small></span></button>)}</div>)}</details>
-              <details className="nav-section"><summary><span>Worktrees</span><b>{worktreeTargets.length}</b></summary>{worktreeTargets.map((target) => <button className="room-item session" key={target} onClick={() => setDraft(`${target} `)}><span>#</span><span><strong>{target}</strong><small>tagging target, not a chat</small></span></button>)}</details>
               <div className="rail-note"><strong>Room ≠ authority.</strong><br/>Messages coordinate intent. Repository and provider state decide what is true.</div>
             </aside>
 
             <section className="chat-pane">
-              <div className="chat-heading"><div><strong>{room}</strong><small>{viewKind === "history" ? "Local read-only CLI history" : viewKind === "thread" ? "Central reference routes to every participant" : "Combined room · every activity shown as read"}</small></div><div className="room-status"><span className="status-dot"/> {viewKind === "history" ? "indexed locally" : "connected locally"}</div></div>
+              <div className="chat-heading"><div><strong>{room}</strong><small>{viewKind === "history" ? "Synced local CLI conversation" : viewKind === "thread" ? "Notification-created room routes to every participant" : "Combined room · every activity shown as read"}</small></div><div className="room-status"><button className="rename-button" onClick={renameCurrent}>Rename</button><span className="status-dot"/> {viewKind === "history" ? "synced locally" : "connected locally"}</div></div>
               <div className="transcript" aria-live="polite">
-                <div className="system-message">{viewKind === "history" ? "Read-only local history. Tool calls, hidden instructions, and reasoning are omitted." : "Room state is stored locally in SQLite. Secret-shaped messages are rejected before write."}</div>
+                <div className="system-message">{viewKind === "history" ? "The composer continues the selected local CLI session when its delivery adapter is available. Tool calls, hidden instructions, and reasoning remain omitted." : "Room state is stored locally in SQLite. Secret-shaped messages are rejected before write."}</div>
                 {messages.map((message) => <div className="message-row" key={message.id}><div className="message-meta"><strong>{message.sender}</strong>{message.time}</div><div className="message-body"><span className="kind">{message.kind}</span>{highlight(message.body)}</div></div>)}
               </div>
-              {viewKind !== "history" ? <><div className="typing">{selectedBuddy === "@api-agent" ? "@api-agent is idle — your tag will wake the session" : `${selectedBuddy} is available`}</div><form className="composer" onSubmit={send}>
+              <><div className="typing">{viewKind === "history" ? "Continue this session from the browser" : selectedBuddy === "@api-agent" ? "@api-agent is idle — your tag will wake the session" : `${selectedBuddy} is available`}</div><form className="composer" onSubmit={send}>
                 <div className="composer-tools"><button type="button"><b>B</b></button><button type="button"><i>I</i></button><button type="button">@</button><button type="button">#</button><span>message as @human · tagging is built in</span></div>
                 <div className="compose-row"><textarea aria-label="Message" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Message the combined room. Try “@api-agent status?”" /><button className="send-button" type="submit">Send</button></div>
-              </form></> : null}
+              </form></>
             </section>
 
             <aside className="buddy-panel">

@@ -8,22 +8,25 @@ Built in public by [TallyUp Engineering](https://github.com/tallyup-engineering)
 
 > Chat Room uses an original late-1990s desktop messenger-inspired interface.
 
-## What ships in v0.2
+## What ships in v0.3
 
 - One room per Git common directory, shared automatically by linked worktrees.
 - Active `@agent` handles and independent `#worktree` targets.
 - Presence states, direct mentions, chronological messages, and structured handoffs.
-- A combined room pinned above read-only local Codex and Claude chat histories, with worktrees kept as a separate collapsible target index.
+- A Slack-inspired navigation with active agents and notification-created coordination rooms under **Chat Room**, plus real local Codex and Claude conversations under **Chats**.
+- Continuously refreshed CLI transcripts. Dormant sessions can be continued through their installed local CLI; an idle Codex session launched with `chat-room codex` accepts turns through its existing local app-server connection.
+- Machine-local rename overlays for both the project room and individual CLI chats; vendor history files remain untouched.
 - Live/recent/stale/inactive chat status, filtering, and a non-destructive inactive review queue.
 - Manual coordination threads for design direction, review, handoff, and blockers.
 - Automatic advisory threads when multiple worktrees currently modify the same path.
-- Derived alert cards for shared-worktree actors, file overlaps, design decisions, blockers, and handoffs, with one settlement CTA.
+- Derived alert cards for shared-worktree actors, file overlaps, potentially stale worktrees, design decisions, blockers, and handoffs, with one routing CTA.
+- Indexed actor/action routing. `investigate`, `consolidate`, and `delete after proof` are editable key/value options; routing opens a tagged chat and never mutates Git.
 - A loopback-only web UI and a normal terminal chat client.
-- Codex lifecycle hooks and an MCP server with ten room tools.
+- Codex lifecycle hooks and an MCP server with twelve room tools.
 - Claude Code hook configuration using the same local protocol.
 - Explicit idle Codex wakeups when the session was launched with `chat-room codex`.
 - SQLite state under `~/.chat-room`, mode `0600`, with credential-shape rejection.
-- No daemon, hosted account, telemetry, or project-specific dependency.
+- No hosted account, telemetry, or project-specific dependency. The optional macOS user service is loopback-only and reversible.
 
 ## Install for Codex
 
@@ -95,7 +98,17 @@ chat-room post --kind request --topic cleanup \
 
 Copy and path-adjust [`examples/claude-settings.json`](examples/claude-settings.json) into the appropriate Claude Code settings scope. It labels those sessions as Claude while preserving the same project room and message format.
 
-Existing Codex and Claude transcripts are indexed directly from their local session stores and displayed read-only. Only user and assistant text is rendered; tool calls, hidden instructions, and reasoning are omitted. History remains in the vendor-owned files and is never imported into Chat Room’s SQLite database.
+Existing Codex and Claude transcripts are indexed directly from their local session stores. Only user and assistant text is rendered; tool calls, hidden instructions, and reasoning are omitted. History remains in the vendor-owned files and is never imported into Chat Room’s SQLite database.
+
+The browser composer continues dormant Codex or Claude sessions through the installed vendor CLI using its ordinary local configuration and sandbox rules. A session already open in another CLI fails closed unless it exposes a safe live adapter; this avoids concurrently resuming one transcript from two processes. Chat Room passes browser prompts over stdin rather than process arguments. The transcript then refreshes from the vendor-owned file.
+
+Notification choices are data, not HTML. Inspect or extend the local option index without rebuilding the interface:
+
+```sh
+chat-room options
+chat-room option-set --namespace worktree_action --key archive \
+  --value "Archive" --metadata '{"order":40,"prompt":"Report an archive plan. Do not mutate Git."}'
+```
 
 Chat status is intentionally mechanical: **Live** has an observed session now, **Recent** was updated within 7 days, **Stale** is 7–29 days old without a live session, and **Inactive** is at least 30 days old without one. The inactive panel is a review queue; Chat Room does not delete vendor-owned histories.
 
@@ -106,7 +119,7 @@ Codex hooks ─┐
 Claude hooks ├── local Python protocol ── SQLite (one logical room per Git project)
 MCP tools ───┤              │
 Terminal UI ─┤              ├── loopback browser UI
-Web UI ──────┘              ├── read-only local chat indexes
+Web UI ──────┘              ├── live local chat indexes + CLI delivery adapters
                             └── explicit idle-session wake over Unix socket
 ```
 

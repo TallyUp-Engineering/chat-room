@@ -121,6 +121,15 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .nav-section > summary::before { content: "▸"; }
 .nav-section[open] > summary::before { content: "⌄"; }
 .nav-section > summary b { margin-left: auto; min-width: 18px; padding: 1px 5px; border-radius: 9px; background: #cbdaf5; color: #385486; text-align: center; font-size: 8px; }
+.active-strip { margin: 1px 3px 7px; display: flex; gap: 4px; overflow-x: auto; }
+.active-strip button { min-width: max-content; padding: 4px 6px; display: flex; align-items: center; gap: 4px; border: 1px solid #b6c6e2; border-radius: 4px; background: rgba(255,255,255,.7); color: #385079; font-size: 7px; cursor: pointer; }
+.active-strip .presence-dot { width: 7px; height: 7px; }
+.rail-subhead { margin: 8px 7px 3px; color: #63718a; font-size: 8px; font-weight: 900; letter-spacing: .06em; text-transform: uppercase; }
+.notification { width: 100%; padding: 6px 7px; display: flex; align-items: center; gap: 6px; border: 1px solid #d7c271; border-radius: 4px; background: #fff8d8; color: #4f4b39; text-align: left; cursor: pointer; }
+.notification > span:first-child { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 4px; background: #fff; color: #8a6c00; font-weight: 900; }
+.notification strong, .notification small { display: block; }
+.notification strong { font-size: 8px; }
+.notification small { color: #766d50; font-size: 7px; }
 .room-item.thread-item { padding-left: 17px; }
 .room-item.thread-item > span:last-child { min-width: 0; flex: 1; }
 .thread-icon, .history-icon { width: 18px; height: 18px; display: grid; flex: 0 0 auto; place-items: center; border-radius: 4px; background: #fff0b3; color: #705a00; font-size: 8px; font-weight: 900; }
@@ -133,6 +142,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .chat-heading strong { display: block; font-size: 13px; }
 .chat-heading small { color: #66738d; font-size: 9px; }
 .room-status { display: flex; align-items: center; gap: 5px; color: #3b6b50; font-size: 9px; }
+.rename-button { padding: 3px 6px; border: 1px solid #93a6c9; border-radius: 3px; background: #fff; color: #50617e; font-size: 8px; cursor: pointer; }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 1px #16733b, inset 0 1px #a8f0c3; }
 .transcript { min-height: 300px; max-height: 364px; padding: 12px; overflow-y: auto; background: linear-gradient(#fff,#fbfcff); scrollbar-color: #8ca6d7 #eaf0fb; }
 .message-row { display: grid; grid-template-columns: 74px 1fr; gap: 8px; margin-bottom: 10px; color: #263454; font-size: 11px; line-height: 1.45; }

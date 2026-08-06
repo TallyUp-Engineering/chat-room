@@ -31,8 +31,8 @@ from urllib.parse import parse_qs, urlparse
 
 
 PLUGIN_NAME = "chat-room"
-VERSION = "0.2.0"
-SCHEMA_VERSION = 2
+VERSION = "0.3.0"
+SCHEMA_VERSION = 3
 ACTIVE_WINDOW_SECONDS = 30 * 60
 WAKE_ENDPOINT_ENV = "CHAT_ROOM_WAKE_ENDPOINT"
 CLIENT_ENV = "CHAT_ROOM_CLIENT"
@@ -58,6 +58,8 @@ WAKE_PROMPT = (
 CHAT_CATALOG_TTL_SECONDS = 15
 CHAT_CATALOG_LOCK = threading.Lock()
 CHAT_CATALOGS: Dict[str, Tuple[float, List[Dict[str, Any]], Dict[Tuple[str, str], Path]]] = {}
+CHAT_DELIVERY_LOCK = threading.Lock()
+CHAT_DELIVERIES: Dict[Tuple[str, str], subprocess.Popen[Any]] = {}
 CONFLICT_SCAN_TTL_SECONDS = 30
 CONFLICT_SCAN_LOCK = threading.Lock()
 CONFLICT_SCANS: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
@@ -244,7 +246,7 @@ def discover_chat_catalog(repo: Repository, force: bool = False) -> Tuple[List[D
             "client": "Codex", "id": session_id,
             "title": concise(indexed.get("thread_name") or f"Codex chat {session_id[:8]}"),
             "updated_at": updated, "recency": chat_recency(updated),
-            "worktree": Path(cwd).name or "worktree", "read_only": True,
+            "worktree": Path(cwd).name or "worktree", "cwd": cwd, "read_only": True,
         })
         files[("codex", session_id)] = path
 
@@ -270,7 +272,7 @@ def discover_chat_catalog(repo: Repository, force: bool = False) -> Tuple[List[D
         title = concise(indexed.get("display") or f"Claude chat {session_id[:8]}")
         summaries.append({
             "client": "Claude", "id": session_id, "title": title,
-            "updated_at": updated, "recency": chat_recency(updated), "worktree": Path(project).name or "worktree", "read_only": True,
+            "updated_at": updated, "recency": chat_recency(updated), "worktree": Path(project).name or "worktree", "cwd": project, "read_only": True,
         })
         files[("claude", session_id)] = path
 
@@ -367,6 +369,19 @@ def list_worktree_references(repo: Repository) -> List[Dict[str, Any]]:
             current["branch"] = line[7:].removeprefix("refs/heads/")
         elif line == "detached":
             current["detached"] = True
+    branch_dates: Dict[str, str] = {}
+    for line in run_git(repo.worktree, "for-each-ref", "--format=%(refname:short)%09%(committerdate:iso-strict)", "refs/heads", check=False).splitlines():
+        branch, separator, updated = line.partition("\t")
+        if separator:
+            branch_dates[branch] = updated
+    for item in items:
+        updated = branch_dates.get(str(item.get("branch") or ""), "")
+        item["updated_at"] = updated or None
+        try:
+            observed = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+            item["age_days"] = max(0, int((datetime.now(timezone.utc) - observed).total_seconds() // 86400))
+        except (TypeError, ValueError):
+            item["age_days"] = None
     return items
 
 
@@ -407,7 +422,7 @@ def preemptive_conflicts(repo: Repository) -> List[Dict[str, Any]]:
         return cached[1] if cached else []
 
 
-def coordination_alerts(targets: Dict[str, Any], threads: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def coordination_alerts(targets: Dict[str, Any], threads: Sequence[Dict[str, Any]], options: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> List[Dict[str, Any]]:
     alerts: List[Dict[str, Any]] = []
     agents = list(targets.get("agents") or [])
     for worktree in targets.get("worktrees") or []:
@@ -438,6 +453,20 @@ def coordination_alerts(targets: Dict[str, Any], threads: Sequence[Dict[str, Any
             "id": f"{alert_type}-{thread['id']}", "type": alert_type, "severity": severity, "icon": icon,
             "title": thread["title"], "detail": thread["reason"], "participants": thread["participants"],
             "paths": thread["paths"], "thread_id": thread["id"],
+        })
+    policy = next((item for item in (options or {}).get("notification_policy", []) if item.get("key") == "stale_worktree_days"), {"value": "30"})
+    try:
+        stale_days = max(1, int(str(policy.get("value") or "30")))
+    except ValueError:
+        stale_days = 30
+    stale = [worktree for worktree in targets.get("worktrees") or [] if not int(worktree.get("active_agents") or 0) and isinstance(worktree.get("age_days"), int) and int(worktree["age_days"]) >= stale_days]
+    if stale:
+        alerts.append({
+            "id": "potentially-stale-worktrees", "type": "stale-worktrees", "severity": "attention", "icon": "stale-worktree",
+            "title": f"{len(stale)} potentially stale worktree{'s' if len(stale) != 1 else ''}",
+            "detail": f"No active actor and last branch commit at least {stale_days} days ago. Route an investigation before disposition.",
+            "participants": ["@human", *[str(item["target"]) for item in stale]],
+            "paths": [str(item["path"]) for item in stale], "thread_id": None,
         })
     return alerts
 
@@ -505,7 +534,7 @@ def _recv_frame(connection: socket.socket) -> Dict[str, Any]:
     return json.loads(payload.decode())
 
 
-def wake_codex(endpoint: str, session_id: str) -> None:
+def wake_codex(endpoint: str, session_id: str, prompt: str = WAKE_PROMPT) -> None:
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     connection.settimeout(6)
     try:
@@ -528,9 +557,76 @@ def wake_codex(endpoint: str, session_id: str) -> None:
                     return
         call(1, "initialize", {"clientInfo": {"name": PLUGIN_NAME, "version": VERSION}})
         _send_frame(connection, b'{"method":"initialized","params":{}}')
-        call(2, "turn/start", {"threadId": session_id, "input": [{"type": "text", "text": WAKE_PROMPT}]})
+        call(2, "turn/start", {"threadId": session_id, "input": [{"type": "text", "text": prompt}]})
     finally:
         connection.close()
+
+
+def chat_delivery_state(summary: Dict[str, Any], members: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    client = str(summary.get("client") or "").lower()
+    session_id = str(summary.get("id") or "")
+    member = next((item for item in members if str(item.get("session_id") or "") == session_id and str(item.get("state") or "") != "offline"), None)
+    key = (client, session_id)
+    with CHAT_DELIVERY_LOCK:
+        process = CHAT_DELIVERIES.get(key)
+        running = bool(process and process.poll() is None)
+        if process and not running:
+            CHAT_DELIVERIES.pop(key, None)
+    if running:
+        return {"ready": False, "mode": "running", "label": "Agent turn running", "detail": "The transcript will refresh as the CLI writes it."}
+    if member:
+        endpoint = str(member.get("wake_endpoint") or "")
+        if client == "codex" and member.get("last_event") == "Stop" and endpoint and socket_ready(endpoint):
+            return {"ready": True, "mode": "live", "label": "Send to live Codex", "detail": "Uses the selected CLI session's local app-server connection."}
+        return {"ready": False, "mode": "active-unattached", "label": "Open in CLI", "detail": "This session is active but has no safe browser delivery adapter. Codex sessions launched with chat-room codex are writable here while idle."}
+    executable = shutil.which("codex" if client == "codex" else "claude" if client == "claude" else "")
+    if executable:
+        return {"ready": True, "mode": "resume", "label": f"Continue in {summary['client']}", "detail": "Starts one local CLI turn in this stored session; normal CLI configuration and sandbox rules still apply."}
+    return {"ready": False, "mode": "unavailable", "label": "History only", "detail": f"The {summary.get('client') or 'vendor'} CLI is not installed on this machine."}
+
+
+def start_chat_delivery(data_dir: Path, repo: Repository, client: str, session_id: str, message: str, members: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    body = ensure_value_free(message)
+    summaries, _files = discover_chat_catalog(repo, force=True)
+    summary = next((item for item in summaries if str(item["client"]).lower() == client.lower() and item["id"] == session_id), None)
+    if summary is None:
+        raise RoomError("local chat session was not found in this Git project")
+    delivery = chat_delivery_state(summary, members)
+    if not delivery["ready"]:
+        raise RoomError(str(delivery["detail"]))
+    active = next((item for item in members if str(item.get("session_id") or "") == session_id and str(item.get("state") or "") != "offline"), None)
+    if delivery["mode"] == "live" and active:
+        wake_codex(str(active["wake_endpoint"]), session_id, body)
+        return {"status": "sent", "mode": "live", "session_id": session_id}
+    normalized = str(summary["client"]).lower()
+    executable = shutil.which("codex" if normalized == "codex" else "claude" if normalized == "claude" else "")
+    if not executable:
+        raise RoomError(f"{summary['client']} CLI is not installed")
+    if normalized == "codex":
+        command = [executable, "exec", "resume", "--all", session_id, "-"]
+    elif normalized == "claude":
+        command = [executable, "--resume", session_id, "--print"]
+    else:
+        raise RoomError("unsupported chat client")
+    worktree = Path(str(summary.get("cwd") or repo.worktree)).expanduser().resolve()
+    if not path_belongs_to_room(worktree, repo, {}):
+        raise RoomError("chat worktree no longer belongs to this project")
+    logs = data_dir / "chat-deliveries"; logs.mkdir(parents=True, exist_ok=True)
+    log_path = logs / f"{normalized}-{slug(session_id, 'session')}.log"
+    environment = os.environ.copy(); environment[CLIENT_ENV] = normalized
+    handle = open(log_path, "ab", buffering=0)
+    try:
+        process = subprocess.Popen(command, cwd=str(worktree), env=environment, stdin=subprocess.PIPE, stdout=handle, stderr=subprocess.STDOUT, start_new_session=True)
+        if process.stdin is None:
+            raise RoomError("CLI delivery stdin is unavailable")
+        process.stdin.write((body + "\n").encode()); process.stdin.close()
+    except Exception:
+        handle.close()
+        raise
+    handle.close()
+    with CHAT_DELIVERY_LOCK:
+        CHAT_DELIVERIES[(normalized, session_id)] = process
+    return {"status": "started", "mode": "resume", "session_id": session_id, "pid": process.pid}
 
 
 class RoomStore:
@@ -565,7 +661,15 @@ class RoomStore:
         CREATE TABLE IF NOT EXISTS cursors(room_id TEXT NOT NULL,participant_id TEXT NOT NULL,last_message_id INTEGER NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(room_id,participant_id));
         CREATE TABLE IF NOT EXISTS threads(id TEXT PRIMARY KEY,room_id TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,status TEXT NOT NULL,title TEXT NOT NULL,reason TEXT NOT NULL,opener TEXT NOT NULL,participants_json TEXT NOT NULL,paths_json TEXT NOT NULL,source TEXT NOT NULL,metadata_json TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS threads_room_status_updated ON threads(room_id,status,updated_at DESC);
+        CREATE TABLE IF NOT EXISTS option_index(namespace TEXT NOT NULL,key TEXT NOT NULL,value TEXT NOT NULL,metadata_json TEXT NOT NULL,PRIMARY KEY(namespace,key));
         """)
+        defaults = (
+            ("worktree_action", "investigate", "Investigate unmerged work", {"order": 10, "prompt": "Inspect the referenced worktree or conflict, report unique unmerged work and evidence, and recommend a safe disposition. Do not mutate Git."}),
+            ("worktree_action", "consolidate", "Consolidate", {"order": 20, "prompt": "Compare the referenced work against current authority, identify the smallest consumer-closed consolidation, and report the exact safe sequence before changing Git."}),
+            ("worktree_action", "delete", "Delete after proof", {"order": 30, "prompt": "Prove the referenced work has no unique reachable value and report a recoverable deletion plan. Do not delete until the human explicitly approves the exact targets."}),
+            ("notification_policy", "stale_worktree_days", "2", {"label": "Potentially stale after days"}),
+        )
+        self.connection.executemany("INSERT OR IGNORE INTO option_index VALUES(?,?,?,?)", [(namespace, key, value, json.dumps(metadata, sort_keys=True)) for namespace, key, value, metadata in defaults])
         self.connection.execute("INSERT OR REPLACE INTO metadata VALUES('schema_version',?)", (str(SCHEMA_VERSION),))
         self.connection.commit()
 
@@ -573,6 +677,58 @@ class RoomStore:
         now = utc_now()
         self.connection.execute("""INSERT INTO rooms VALUES(?,?,?,?,?,?) ON CONFLICT(room_id) DO UPDATE SET project_identity=excluded.project_identity,common_dir=excluded.common_dir,repository_root=excluded.repository_root,last_seen_at=excluded.last_seen_at""", (repo.room_id, repo.project_identity, str(repo.common_dir), str(repo.worktree), now, now))
         self.connection.commit()
+
+    def options(self) -> Dict[str, List[Dict[str, Any]]]:
+        rows = self.connection.execute("SELECT * FROM option_index ORDER BY namespace,key").fetchall()
+        result: Dict[str, List[Dict[str, Any]]] = {}
+        for row in rows:
+            result.setdefault(str(row["namespace"]), []).append({"key": row["key"], "value": row["value"], "metadata": json.loads(row["metadata_json"])})
+        return result
+
+    def option(self, namespace: str, key: str) -> Dict[str, Any]:
+        row = self.connection.execute("SELECT * FROM option_index WHERE namespace=? AND key=?", (namespace, key)).fetchone()
+        if row is None:
+            raise RoomError(f"unknown indexed option: {namespace}/{key}")
+        return {"namespace": row["namespace"], "key": row["key"], "value": row["value"], "metadata": json.loads(row["metadata_json"])}
+
+    def set_option(self, namespace: str, key: str, value: str, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        clean_namespace = re.sub(r"[^a-z0-9_-]+", "-", namespace.strip().lower()).strip("-") or "options"
+        clean_key = slug(key, "option")
+        clean_value = concise(ensure_value_free(value), 160)
+        metadata_json = json.dumps(metadata or {}, sort_keys=True)
+        ensure_value_free(metadata_json)
+        self.connection.execute("INSERT INTO option_index VALUES(?,?,?,?) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value,metadata_json=excluded.metadata_json", (clean_namespace, clean_key, clean_value, metadata_json))
+        self.connection.commit()
+        return self.option(clean_namespace, clean_key)
+
+    def display_name(self, namespace: str, key: str, fallback: str) -> str:
+        try:
+            return str(self.option(namespace, slug(key))["value"])
+        except RoomError:
+            return fallback
+
+    def rename(self, repo: Repository, kind: str, reference: str, label: str, client: str = "") -> Dict[str, Any]:
+        clean = concise(ensure_value_free(label), 120)
+        if kind == "room":
+            value = self.set_option("room_name", repo.room_id, clean, {"kind": "room"})
+        elif kind == "chat":
+            summaries, _files = discover_chat_catalog(repo)
+            if not any(item["id"] == reference and str(item["client"]).lower() == client.lower() for item in summaries):
+                raise RoomError("local chat session was not found in this Git project")
+            value = self.set_option("chat_name", f"{client}-{reference}", clean, {"kind": "chat", "client": client, "session_id": reference})
+        else:
+            raise RoomError("only rooms and chats can be renamed")
+        return {"kind": kind, "reference": reference, "label": value["value"]}
+
+    def route_notification(self, repo: Repository, title: str, alert_type: str, actor: str, action_key: str, participants: Sequence[str], paths: Sequence[str]) -> Dict[str, Any]:
+        action = self.option("worktree_action", action_key)
+        selected_actor = target_token(actor)
+        routed = ["@human", selected_actor, *participants]
+        thread = self.open_thread(repo, title, f"{alert_type}: {action['value']}", "@human", routed, paths, "notification-route")
+        tags = " ".join(thread["participants"])
+        prompt = str(action["metadata"].get("prompt") or action["value"])
+        self.post_thread(repo, thread["id"], "@human", f"{tags} {prompt} Notification: {thread['title']}.")
+        return thread
 
     def latest_repository(self) -> Optional[Repository]:
         row = self.connection.execute("SELECT repository_root FROM rooms ORDER BY last_seen_at DESC LIMIT 1").fetchone()
@@ -687,13 +843,23 @@ class RoomStore:
         for conflict in conflicts:
             worktrees = conflict["worktrees"]
             worktree_paths = {str(item["path"]) for item in worktrees}
-            participants = [str(item["target"]) for item in worktrees]
+            participants = ["@human"]
+            participants.extend(str(item["target"]) for item in worktrees)
             participants.extend(str(member["target"]) for member in members if member["state"] != "offline" and str(member["worktree"]) in worktree_paths)
             stable_targets = sorted(str(item["target"]) for item in worktrees)
             digest = hashlib.sha256(f"{repo.room_id}\n{conflict['path']}\n{' '.join(stable_targets)}".encode()).hexdigest()[:12]
             thread_id = "conflict-" + digest
             active_ids.add(thread_id)
+            prompted = self.connection.execute("SELECT 1 FROM messages WHERE room_id=? AND topic=? AND sender='@chat-room' LIMIT 1", (repo.room_id, f"thread:{thread_id}")).fetchone() is not None
             self.open_thread(repo, f"Potential conflict: {conflict['path']}", "preemptive file overlap", "@chat-room", participants, [str(conflict["path"])], "preemptive-conflict", thread_id)
+            if not prompted:
+                tags = " ".join(dict.fromkeys(participants))
+                self.post_thread(
+                    repo,
+                    thread_id,
+                    "@chat-room",
+                    f"{tags} coordination requested for {conflict['path']}. Confirm ownership, write order, and handoff here before either worktree changes this path again.",
+                )
         open_auto = self.connection.execute("SELECT id FROM threads WHERE room_id=? AND status='open' AND source='preemptive-conflict'", (repo.room_id,)).fetchall()
         stale = [str(row["id"]) for row in open_auto if str(row["id"]) not in active_ids]
         if stale:
@@ -817,6 +983,8 @@ def tool_definitions() -> List[Dict[str, Any]]:
         {"name": "room_read", "description": "Read chronological room messages.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "after_id": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}}},
         {"name": "room_members", "description": "List observed agent sessions and presence.", "inputSchema": {"type": "object", "properties": {"cwd": cwd}}},
         {"name": "room_targets", "description": "List active @agent and #worktree targets.", "inputSchema": {"type": "object", "properties": {"cwd": cwd}}},
+        {"name": "room_options", "description": "List the indexed notification actions and policy options used by Chat Room.", "inputSchema": {"type": "object", "properties": {"cwd": cwd}}},
+        {"name": "room_option_set", "description": "Add or update one machine-local indexed option without rebuilding the UI.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "namespace": {"type": "string"}, "key": {"type": "string"}, "value": {"type": "string"}, "metadata": {"type": "object"}}, "required": ["namespace", "key", "value"]}},
         {"name": "room_threads", "description": "List open manual and preemptive-conflict coordination threads.", "inputSchema": {"type": "object", "properties": {"cwd": cwd}}},
         {"name": "room_thread_open", "description": "Open a coordination thread for design direction, review, handoff, blocker, or conflict resolution.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "title": {"type": "string"}, "reason": {"type": "string"}, "participants": {"type": "array", "items": {"type": "string"}}, "paths": {"type": "array", "items": {"type": "string"}}}, "required": ["title", "reason"]}},
         {"name": "room_thread_close", "description": "Mark a coordination thread resolved without changing Git state.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "thread_id": {"type": "string"}}, "required": ["thread_id"]}},
@@ -832,6 +1000,8 @@ def execute_tool(store: RoomStore, name: str, args: Dict[str, Any]) -> Any:
     if name == "room_read": return {"room_id": repo.room_id, "messages": store.read(repo.room_id, int(args.get("after_id", 0)), int(args.get("limit", 50)))}
     if name == "room_members": return {"room_id": repo.room_id, "members": store.members(repo.room_id)}
     if name == "room_targets": return store.targets(repo)
+    if name == "room_options": return {"room_id": repo.room_id, "options": store.options()}
+    if name == "room_option_set": return store.set_option(str(args["namespace"]), str(args["key"]), str(args["value"]), args.get("metadata") if isinstance(args.get("metadata"), dict) else {})
     if name == "room_threads": return {"room_id": repo.room_id, "threads": store.sync_preemptive_conflicts(repo)}
     if name == "room_thread_open": return store.open_thread(repo, str(args["title"]), str(args["reason"]), str(args.get("opener") or f"{client_name()}-session"), [str(x) for x in args.get("participants", [])], [str(x) for x in args.get("paths", [])])
     if name == "room_thread_close": return store.close_thread(repo, str(args["thread_id"]))
@@ -891,18 +1061,28 @@ class RoomHandler(BaseHTTPRequestHandler):
             with RoomStore(self.app.data_dir) as store:
                 threads = store.sync_preemptive_conflicts(self.app.repo)
                 targets = store.targets(self.app.repo)
-                self.send_json({"status": store.status(self.app.repo), "messages": store.recent(self.app.repo.room_id, 2000), "targets": targets, "threads": threads, "alerts": coordination_alerts(targets, threads)})
+                options = store.options()
+                status = store.status(self.app.repo)
+                status["display_name"] = store.display_name("room_name", self.app.repo.room_id, self.app.repo.worktree.name or "Chat Room")
+                self.send_json({"status": status, "messages": store.recent(self.app.repo.room_id, 2000), "targets": targets, "threads": threads, "alerts": coordination_alerts(targets, threads, options), "options": options})
             return
         if path == "/api/chats":
             if not self.authorized(): self.send_json({"error": "invalid local token"}, 403); return
             chats, _files = discover_chat_catalog(self.app.repo)
+            with RoomStore(self.app.data_dir) as store:
+                for chat in chats:
+                    chat["title"] = store.display_name("chat_name", f"{chat['client']}-{chat['id']}", str(chat["title"]))
             self.send_json({"chats": chats})
             return
         if path == "/api/chat":
             if not self.authorized(): self.send_json({"error": "invalid local token"}, 403); return
             query = parse_qs(parsed.query)
             try:
-                self.send_json(chat_transcript(self.app.repo, str(query.get("client", [""])[0]), str(query.get("id", [""])[0])))
+                value = chat_transcript(self.app.repo, str(query.get("client", [""])[0]), str(query.get("id", [""])[0]))
+                with RoomStore(self.app.data_dir) as store:
+                    value["chat"]["title"] = store.display_name("chat_name", f"{value['chat']['client']}-{value['chat']['id']}", str(value["chat"]["title"]))
+                    value["delivery"] = chat_delivery_state(value["chat"], store.members(self.app.repo.room_id))
+                self.send_json(value)
             except RoomError as error:
                 self.send_json({"error": str(error)}, 404)
             return
@@ -917,11 +1097,17 @@ class RoomHandler(BaseHTTPRequestHandler):
         if not self.valid_host(): self.send_error(HTTPStatus.MISDIRECTED_REQUEST); return
         if not self.authorized(): self.send_json({"error": "invalid local token"}, 403); return
         path = urlparse(self.path).path
-        if path not in ("/api/messages", "/api/threads", "/api/thread-close"): self.send_error(404); return
+        if path not in ("/api/messages", "/api/threads", "/api/thread-close", "/api/chat-send", "/api/route-alert", "/api/rename"): self.send_error(404); return
         try:
             length = min(int(self.headers.get("Content-Length", "0")), 16384); body = json.loads(self.rfile.read(length) or b"{}")
             with RoomStore(self.app.data_dir) as store:
-                if path == "/api/threads":
+                if path == "/api/chat-send":
+                    value = start_chat_delivery(self.app.data_dir, self.app.repo, str(body.get("client") or ""), str(body.get("session_id") or ""), str(body.get("message") or ""), store.members(self.app.repo.room_id))
+                elif path == "/api/rename":
+                    value = store.rename(self.app.repo, str(body.get("kind") or ""), str(body.get("reference") or ""), str(body.get("label") or ""), str(body.get("client") or ""))
+                elif path == "/api/route-alert":
+                    value = store.route_notification(self.app.repo, str(body.get("title") or "Notification settlement"), str(body.get("alert_type") or "notification"), str(body.get("actor") or "@human"), str(body.get("action") or "investigate"), [str(x) for x in body.get("participants", [])], [str(x) for x in body.get("paths", [])])
+                elif path == "/api/threads":
                     value = store.open_thread(self.app.repo, str(body.get("title") or ""), str(body.get("reason") or "coordination"), "@human", [str(x) for x in body.get("participants", [])], [str(x) for x in body.get("paths", [])])
                 elif path == "/api/thread-close":
                     value = store.close_thread(self.app.repo, str(body.get("thread_id") or ""))
@@ -929,7 +1115,7 @@ class RoomHandler(BaseHTTPRequestHandler):
                     value = store.post_thread(self.app.repo, str(body["thread_id"]), "@human", str(body.get("message") or ""))
                 else:
                     value = store.post(self.app.repo, "@human", str(body.get("kind") or "message"), str(body.get("topic") or "general"), "posted", str(body.get("message") or ""), [str(x) for x in body.get("recipients", [])])
-            self.send_json(value, 201)
+            self.send_json(value, 202 if path == "/api/chat-send" else 201)
         except (RoomError, ValueError, json.JSONDecodeError) as error: self.send_json({"error": str(error)}, 400)
 
 
@@ -1065,7 +1251,7 @@ def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(prog="chat-room", description="Local chat for humans, coding agents, and Git worktrees")
     value.add_argument("--data-dir", type=Path, default=default_data_dir())
     sub = value.add_subparsers(dest="command", required=True)
-    for name in ("status", "targets", "members", "threads", "read", "chat", "ui"):
+    for name in ("status", "targets", "members", "threads", "options", "read", "chat", "ui"):
         command = sub.add_parser(name); command.add_argument("--cwd")
         if name == "read": command.add_argument("--after-id", type=int, default=0); command.add_argument("--limit", type=int, default=50)
         if name == "chat": command.add_argument("--sender", default="@human")
@@ -1074,6 +1260,7 @@ def parser() -> argparse.ArgumentParser:
     identify = sub.add_parser("identify"); identify.add_argument("--cwd"); identify.add_argument("--session", required=True); identify.add_argument("--handle", required=True)
     thread_open = sub.add_parser("thread-open"); thread_open.add_argument("--cwd"); thread_open.add_argument("--title", required=True); thread_open.add_argument("--reason", default="coordination"); thread_open.add_argument("--participant", action="append", default=[]); thread_open.add_argument("--path", action="append", default=[])
     thread_close = sub.add_parser("thread-close"); thread_close.add_argument("--cwd"); thread_close.add_argument("--thread", required=True)
+    option_set = sub.add_parser("option-set"); option_set.add_argument("--cwd"); option_set.add_argument("--namespace", required=True); option_set.add_argument("--key", required=True); option_set.add_argument("--value", required=True); option_set.add_argument("--metadata", default="{}")
     service = sub.add_parser("service"); service_actions = service.add_subparsers(dest="service_action", required=True)
     service_install = service_actions.add_parser("install"); service_install.add_argument("--cwd"); service_install.add_argument("--hostname", default="chatroom.localhost"); service_install.add_argument("--port", type=int, default=7391)
     service_actions.add_parser("status"); service_actions.add_parser("uninstall")
@@ -1100,10 +1287,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             elif args.command == "targets": value = store.targets(repo)
             elif args.command == "members": value = {"room_id": repo.room_id, "members": store.members(repo.room_id)}
             elif args.command == "threads": value = {"room_id": repo.room_id, "threads": store.sync_preemptive_conflicts(repo)}
+            elif args.command == "options": value = {"room_id": repo.room_id, "options": store.options()}
             elif args.command == "read": value = {"room_id": repo.room_id, "messages": store.read(repo.room_id, args.after_id, args.limit)}
             elif args.command == "identify": value = store.claim_handle(repo, args.session, args.handle)
             elif args.command == "thread-open": value = store.open_thread(repo, args.title, args.reason, "@human", args.participant, args.path)
             elif args.command == "thread-close": value = store.close_thread(repo, args.thread)
+            elif args.command == "option-set":
+                try: metadata = json.loads(args.metadata)
+                except json.JSONDecodeError as error: raise RoomError(f"invalid option metadata JSON: {error}") from error
+                if not isinstance(metadata, dict): raise RoomError("option metadata must be a JSON object")
+                value = store.set_option(args.namespace, args.key, args.value, metadata)
             elif args.command == "post": value = store.post(repo, args.sender, args.kind, args.topic, args.status, args.message, args.recipient)
             elif args.command == "chat": return run_chat(store, repo, args.sender)
             else: raise RoomError("unknown command")
