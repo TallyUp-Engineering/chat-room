@@ -8,20 +8,21 @@ Built in public by [TallyUp Engineering](https://github.com/tallyup-engineering)
 
 > Chat Room uses an original late-1990s desktop messenger-inspired interface.
 
-## What ships in v0.4
+## What ships in v0.5
 
 - One room per Git common directory, shared automatically by linked worktrees.
 - Active `@agent` handles and independent `#worktree` targets.
 - Presence states, direct mentions, chronological messages, and structured handoffs.
-- A Slack-inspired navigation with active agents and notification-created coordination rooms under **Chat Room**, plus real local Codex and Claude conversations under **Chats**.
+- A primary **Command Console** for all project activity, a durable **Human in the Loop** question queue, agent-only **Chatter**, and real local Codex and Claude conversations under **Chats**.
 - Live CLI transcripts with signature-stable rendering. Dormant sessions can be continued through their installed local CLI; an idle Codex session launched with `chat-room codex` accepts turns through its existing local app-server connection.
 - Paste, drop, or attach images when continuing a supported Codex or Claude conversation. Temporary image files are private and removed after delivery.
 - Machine-local rename overlays for both the project room and individual CLI chats; vendor history files remain untouched.
 - Live/recent/stale/inactive chat status, filtering, and a non-destructive inactive review queue.
-- Durable team channels and temporary coordination channels for design direction, review, handoff, blockers, and one focused goal.
+- Durable human questions preserve their initiating actor and reason so answers return to the right context. Agent chatter remains separately readable and never silently recruits the human.
+- Durable team chatter and temporary coordination chatter for review, handoff, blockers, conflicts, and one focused goal.
 - One explicit composer route: the selected channel, every active worker, or one tagged worker. Broadcast coordinates through the room; it does not start duplicate CLI turns.
-- Automatic advisory threads when multiple worktrees currently modify the same path.
-- Derived alert cards for shared-worktree actors, file overlaps, potentially stale worktrees, design decisions, blockers, and handoffs, with one routing CTA.
+- Automatic advisory chatter when multiple worktrees currently modify the same path. Repeated file overlaps with the same participant cohort collapse into one thread with every affected path.
+- Quiet, grouped chatter suggestions for shared-worktree actors and file overlaps. A small `+` deliberately activates the conversation; there is no alert-card wall.
 - Indexed actor/action routing. `investigate`, `consolidate`, and `delete after proof` are editable key/value options; routing opens a tagged chat and never mutates Git.
 - A loopback-only web UI with WebSocket change signals and bounded reconciliation, plus a normal terminal chat client.
 - Codex lifecycle hooks and an MCP server with twelve room tools.
@@ -90,7 +91,8 @@ Useful one-shot commands:
 chat-room status
 chat-room targets
 chat-room threads
-chat-room thread-open --title "Choose navigation direction" \
+chat-room thread-open --audience human-loop --origin agent-request \
+  --title "Choose navigation direction" \
   --reason "design direction" --lifetime durable \
   --participant @human --participant @ui-agent
 chat-room post --kind request --topic cleanup \

@@ -11,24 +11,35 @@
     <div id="layout" class="layout">
       <aside class="rooms">
         <details class="nav-section" open>
-          <summary><span>Chat Room</span><em id="combined-count">0</em></summary>
+          <summary><span>Command Console</span><em id="combined-count">0</em></summary>
           <div id="active-agents" class="active-agents"><p class="nav-empty">Looking for active agents…</p></div>
-          <button id="combined-room" class="conversation active"><span class="conversation-icon">◎</span><span><b>All activity</b><small>Combined room · read</small></span></button>
-          <div class="nav-subhead"><span>Needs attention</span><em id="alert-count">0</em></div>
-          <div id="alerts"><p class="nav-empty">No coordination alerts.</p></div>
-          <form id="alert-router" class="thread-form" hidden>
-            <b id="alert-router-title">Route notification</b>
-            <label>Actor<select id="alert-actor" required></select></label>
-            <label>Action<select id="alert-action" required></select></label>
-            <span><button type="submit">Open coordination chat</button><button id="cancel-alert" type="button">Cancel</button></span>
-            <small>Advisory only: this opens a tagged thread and never changes Git.</small>
+          <button id="combined-room" class="conversation active"><span class="conversation-icon">◎</span><span><b>Command Console</b><small>All project activity · read</small></span></button>
+        </details>
+
+        <details class="nav-section human-loop" open>
+          <summary><span>Human in the Loop</span><em id="human-count">0</em></summary>
+          <p class="section-note">Questions that need a person. Answers stay attached to the originating context.</p>
+          <div id="human-threads"><p class="nav-empty">No open questions.</p></div>
+          <button id="new-human-thread" class="new-thread" type="button">＋ Ask or route a question</button>
+          <form id="human-thread-form" class="thread-form" hidden>
+            <input id="human-thread-title" maxlength="120" required placeholder="What needs a human decision?">
+            <select id="human-thread-reason"><option>design direction</option><option>approval</option><option>missing context</option><option>blocker</option><option>review</option></select>
+            <input id="human-thread-participants" placeholder="@agent #worktree">
+            <input id="human-thread-paths" placeholder="optional/path another/path">
+            <span><button type="submit">Open question</button><button id="cancel-human-thread" type="button">Cancel</button></span>
           </form>
-          <div class="nav-subhead"><span>Coordination rooms</span><em id="thread-count">0</em></div>
+        </details>
+
+        <details class="nav-section chatter" open>
+          <summary><span>Chatter</span><em id="thread-count">0</em></summary>
+          <p class="section-note">Agent-only coordination. Human-readable, but agents settle it together.</p>
+          <div id="suggestions"><p class="nav-empty">No chatter suggested.</p></div>
           <div id="threads"></div>
-          <button id="new-thread" class="new-thread" type="button">＋ Open coordination thread</button>
+          <button id="new-thread" class="new-thread" type="button">＋ Start chatter</button>
           <form id="thread-form" class="thread-form" hidden>
-            <input id="thread-title" maxlength="120" required placeholder="What needs coordination?">
-            <select id="thread-reason"><option>design direction</option><option>preemptive conflict</option><option>review</option><option>handoff</option><option>blocker</option><option>other coordination</option></select>
+            <input id="thread-title" maxlength="120" required placeholder="What should the agents coordinate?">
+            <select id="thread-reason"><option>preemptive conflict</option><option>shared worktree</option><option>handoff</option><option>review</option><option>implementation coordination</option><option>other coordination</option></select>
+            <select id="thread-origin"><option value="human activation">Started by human</option><option value="observed activity">Observed activity</option><option value="notification">Notification</option><option value="agent request">Agent request</option></select>
             <select id="thread-lifetime"><option value="durable">Durable team channel</option><option value="temporary">Temporary coordination channel</option></select>
             <input id="thread-participants" placeholder="@actor #worktree">
             <input id="thread-paths" placeholder="optional/path another/path">
@@ -36,7 +47,7 @@
           </form>
         </details>
 
-        <details class="nav-section" open>
+        <details class="nav-section">
           <summary><span>Chats</span><em id="chat-count">0</em></summary>
           <div class="chat-controls"><input id="chat-filter" class="chat-filter" type="search" placeholder="Filter local chats…" aria-label="Filter local chats"><select id="chat-status-filter" aria-label="Filter by activity status"><option value="all">All statuses</option><option value="live">Live</option><option value="recent">Recent</option><option value="stale">Stale</option><option value="inactive">Inactive</option></select><button id="list-inactive" type="button">List inactive</button></div>
           <div id="chats"><p class="nav-empty">Loading local histories…</p></div>
@@ -45,10 +56,10 @@
         <p class="authority"><b>Room ≠ authority.</b><br>Git and provider state remain authoritative.</p>
       </aside>
       <section id="chat-pane" class="chat">
-        <header><div><b id="view-title">All activity</b><small id="identity">local Git project · combined room</small></div><div class="view-actions"><button id="rename-view" type="button">Rename</button><button id="close-thread" type="button" hidden>Resolve</button><span id="view-status" class="connected">● connected locally</span></div></header>
+        <header><div><b id="view-title">Command Console</b><small id="identity">local Git project · all activity</small></div><div class="view-actions"><button id="rename-view" type="button">Rename</button><button id="close-thread" type="button" hidden>Resolve</button><span id="view-status" class="connected">● connected locally</span></div></header>
         <div id="messages" class="messages"><p class="notice">Room data stays on this machine. Local CLI histories stay vendor-owned and are never copied into the room database.</p></div>
         <p id="error" class="error" hidden></p>
-        <form id="composer"><div class="tools"><b>B</b>　<i>I</i>　 @　 #　 <button id="attach-image" type="button" title="Attach images" aria-label="Attach images">📎</button><input id="image-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden><span id="room-routing"><select id="send-scope" aria-label="Message route"><option value="channel">Channel</option><option value="all">All active</option><option value="tag">Tag worker</option></select><select id="send-target" aria-label="Worker to tag" hidden></select></span><span id="compose-label">message as @human · ad hoc tagging is built in</span></div><div id="attachments" class="attachments" hidden></div><div class="compose"><textarea id="message" maxlength="4000" placeholder="Message the combined room. Tag an active @actor or #worktree."></textarea><button id="send-message">Send</button></div></form>
+        <form id="composer"><div class="tools"><b>B</b>　<i>I</i>　 @　 #　 <button id="attach-image" type="button" title="Attach images" aria-label="Attach images">📎</button><input id="image-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden><span id="room-routing"><select id="send-scope" aria-label="Message route"><option value="channel">Console</option><option value="all">All active</option><option value="tag">Tag worker</option></select><select id="send-target" aria-label="Worker to tag" hidden></select></span><span id="compose-label">message as @human · route to all or tag one worker</span></div><div id="attachments" class="attachments" hidden></div><div class="compose"><textarea id="message" maxlength="4000" placeholder="Message the command console. Tag an active @actor or #worktree."></textarea><button id="send-message">Send</button></div></form>
       </section>
       <aside class="buddies"><div class="self"><span>H</span><div><b>@human</b><small>local operator</small></div></div><select><option>Available</option><option>Heads down</option><option>Away</option></select><div id="members"></div></aside>
       <footer><span id="authority">advisory-only</span><span id="counts">0 messages • 0 active</span></footer>

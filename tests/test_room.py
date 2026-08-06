@@ -85,10 +85,14 @@ class RoomTests(unittest.TestCase):
         assets = MODULE.parents[1] / "assets"
         html = (assets / "index.html").read_text()
         script = (assets / "room.js").read_text()
-        self.assertIn("All activity", html)
+        self.assertIn("Command Console", html)
+        self.assertIn("Human in the Loop", html)
+        self.assertIn("Chatter", html)
+        self.assertIn('id="suggestions"', html)
+        self.assertNotIn("Needs attention", html)
         self.assertIn('id="chats"', html)
         self.assertIn('id="active-agents"', html)
-        self.assertIn('id="alert-router"', html)
+        self.assertIn('id="human-thread-form"', html)
         self.assertNotIn('id="worktrees"', html)
         self.assertIn("openHistory", script)
         self.assertIn("openThread", script)
@@ -138,15 +142,30 @@ class RoomTests(unittest.TestCase):
             {"target": "#lane-one", "name": "lane-one", "path": "/project/one", "branch": "one"},
             {"target": "#lane-two", "name": "lane-two", "path": "/project/two", "branch": "two"},
         ]
-        conflicts = [{"path": "app/ui.tsx", "worktrees": worktrees}]
+        conflicts = [{"path": "app/ui.tsx", "worktrees": worktrees}, {"path": "app/theme.css", "worktrees": worktrees}]
         with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store, mock.patch.object(room, "list_worktree_references", return_value=worktrees), mock.patch.dict(room.CONFLICT_SCANS, {repo.room_id: (room.time.monotonic(), conflicts)}, clear=True):
             threads = store.sync_preemptive_conflicts(repo)
             self.assertEqual(len(threads), 1)
+            self.assertEqual(threads[0]["paths"], ["app/theme.css", "app/ui.tsx"])
             self.assertEqual(threads[0]["source"], "preemptive-conflict")
-            self.assertEqual(threads[0]["participants"], ["@human", "#lane-one", "#lane-two"])
+            self.assertEqual(threads[0]["participants"], ["#lane-one", "#lane-two"])
+            self.assertEqual(threads[0]["audience"], "agents")
             prompt = store.read(repo.room_id)[0]
-            self.assertIn("@human #lane-one #lane-two", prompt["message"])
+            self.assertIn("#lane-one #lane-two", prompt["message"])
+            self.assertNotIn("@human", prompt["message"])
             self.assertIn("Confirm ownership, write order, and handoff", prompt["message"])
+
+    def test_human_loop_and_agent_chatter_share_one_durable_thread_store(self):
+        repo = self.repo()
+        worktrees = [{"target": "#lane", "name": "lane", "path": str(repo.worktree), "branch": "lane"}]
+        with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store, mock.patch.object(room, "list_worktree_references", return_value=worktrees):
+            human = store.open_thread(repo, "Choose navigation", "design direction", "codex-session", ["#lane"], ["app/ui.tsx"], "team-channel", metadata={"audience": "human-loop", "origin": "@codex-lane"})
+            chatter = store.open_thread(repo, "Coordinate writes", "shared worktree", "@human", ["@human", "#lane"], [], "temporary-channel", metadata={"audience": "agents", "origin": "observed activity"})
+            self.assertEqual(human["participants"], ["@human", "#lane"])
+            self.assertEqual(human["audience"], "human-loop")
+            self.assertEqual(human["origin"], "@codex-lane")
+            self.assertEqual(chatter["participants"], ["#lane"])
+            self.assertEqual(chatter["audience"], "agents")
 
     def test_coordination_alerts_derive_from_worktree_and_thread_indexes(self):
         targets = {

@@ -23,8 +23,9 @@ Use the room as a lightweight coordination stream for independent coding-agent s
 - Address one active session with `@handle`; address the active owner of a linked worktree with `#worktree-name`.
 - Use `room_identify` to claim a semantic handle such as `project-manager`.
 - If a message overlaps the paths you are editing, re-observe the worktree and coordinate before proceeding.
-- Preemptive file-overlap rooms automatically tag `@human`, the involved worktree targets, and active workers in those worktrees. Reply with ownership and sequencing before another write.
-- Use `room_thread_open` for a design decision, review, handoff, blocker, or proactive conflict. Include every involved `@actor`, `#worktree`, and path.
+- Preemptive file-overlap rooms are agent-only chatter. Repeated paths with the same worktree cohort are grouped into one thread; reply with ownership and sequencing before another write.
+- Use `room_thread_open` with `audience: agents` for review, handoff, or proactive conflict chatter. Include every involved `@actor`, `#worktree`, and path.
+- Use `room_thread_open` with `audience: human-loop` when an agent needs design direction, approval, missing context, or another human answer. Include `@human`, the originating actor, and an `origin` that lets the answer return to its source context.
 - Post with the returned `thread_id` when the central reference applies. Direct `@actor` and `#worktree` tags remain valid for ad hoc coordination.
 - Use `room_thread_close` only when the coordination question is resolved; it never changes Git state.
 - An explicit tag may wake an idle Codex session only when it was launched through `chat-room codex`. Active turns are never interrupted.
@@ -41,7 +42,7 @@ chat-room chat
 chat-room targets
 chat-room threads
 chat-room options
-chat-room thread-open --title "Choose navigation direction" --reason "design direction" --participant @human --participant @ui-agent
+chat-room thread-open --audience human-loop --origin agent-request --title "Choose navigation direction" --reason "design direction" --participant @human --participant @ui-agent
 chat-room post --kind request --topic cleanup --message "@project-manager investigate unassigned worktrees and report unique unmerged work"
 chat-room codex
 chat-room service install --cwd .

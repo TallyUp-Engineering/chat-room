@@ -35,7 +35,7 @@ from urllib.request import Request, urlopen
 
 
 PLUGIN_NAME = "chat-room"
-VERSION = "0.4.2"
+VERSION = "0.5.0"
 SCHEMA_VERSION = 4
 ACTIVE_WINDOW_SECONDS = 30 * 60
 WAKE_ENDPOINT_ENV = "CHAT_ROOM_WAKE_ENDPOINT"
@@ -810,7 +810,7 @@ class RoomStore:
         action = self.option("worktree_action", action_key)
         selected_actor = target_token(actor)
         routed = ["@human", selected_actor, *participants]
-        thread = self.open_thread(repo, title, f"{alert_type}: {action['value']}", "@human", routed, paths, "notification-route")
+        thread = self.open_thread(repo, title, f"{alert_type}: {action['value']}", "@human", routed, paths, "notification-route", metadata={"audience": "human-loop", "origin": "notification"})
         tags = " ".join(thread["participants"])
         prompt = str(action["metadata"].get("prompt") or action["value"])
         self.post_thread(repo, thread["id"], "@human", f"{tags} {prompt} Notification: {thread['title']}.")
@@ -885,6 +885,8 @@ class RoomStore:
             value["participants"] = json.loads(value.pop("participants_json"))
             value["paths"] = json.loads(value.pop("paths_json"))
             value["metadata"] = json.loads(value.pop("metadata_json"))
+            value["audience"] = value["metadata"].get("audience") or ("agents" if value["source"] == "preemptive-conflict" else "human-loop" if "@human" in value["participants"] else "agents")
+            value["origin"] = value["metadata"].get("origin") or value["opener"]
             value["lifetime"] = "temporary" if value["source"] in ("preemptive-conflict", "notification-route", "temporary-channel") else "durable"
             result.append(value)
         return result
@@ -895,10 +897,20 @@ class RoomStore:
             raise RoomError("coordination thread does not exist")
         return value
 
-    def open_thread(self, repo: Repository, title: str, reason: str, opener: str, participants: Sequence[str], paths: Sequence[str], source: str = "manual", thread_id: Optional[str] = None) -> Dict[str, Any]:
+    def open_thread(self, repo: Repository, title: str, reason: str, opener: str, participants: Sequence[str], paths: Sequence[str], source: str = "manual", thread_id: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         heading = concise(ensure_value_free(title), 120)
         why = concise(ensure_value_free(reason), 240)
+        thread_metadata = dict(metadata or {})
+        audience = str(thread_metadata.get("audience") or "agents")
+        if audience not in ("agents", "human-loop"):
+            raise RoomError("thread audience must be agents or human-loop")
+        thread_metadata["audience"] = audience
+        thread_metadata["origin"] = concise(str(thread_metadata.get("origin") or opener), 80)
         targets = list(dict.fromkeys(target_token(value) for value in participants if str(value).strip()))
+        if audience == "agents":
+            targets = [value for value in targets if value != "@human"]
+        elif "@human" not in targets:
+            targets.insert(0, "@human")
         unknown = [value for value in targets if value not in self.allowed_targets(repo)]
         if unknown:
             if source == "preemptive-conflict":
@@ -911,7 +923,7 @@ class RoomStore:
         self.connection.execute(
             """INSERT INTO threads VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at,status='open',title=excluded.title,reason=excluded.reason,participants_json=excluded.participants_json,paths_json=excluded.paths_json,metadata_json=excluded.metadata_json""",
-            (identifier, repo.room_id, now, now, "open", heading, why, concise(opener, 100), json.dumps(targets), json.dumps(clean_paths), source, json.dumps({}, sort_keys=True)),
+            (identifier, repo.room_id, now, now, "open", heading, why, concise(opener, 100), json.dumps(targets), json.dumps(clean_paths), source, json.dumps(thread_metadata, sort_keys=True)),
         )
         self.connection.commit()
         return self.thread(repo, identifier)
@@ -940,25 +952,31 @@ class RoomStore:
         conflicts = preemptive_conflicts(repo)
         if not had_scan:
             return self.threads(repo)
+        grouped: Dict[Tuple[str, ...], Dict[str, Any]] = {}
         for conflict in conflicts:
-            worktrees = conflict["worktrees"]
+            stable_targets = tuple(sorted(str(item["target"]) for item in conflict["worktrees"]))
+            group = grouped.setdefault(stable_targets, {"worktrees": conflict["worktrees"], "paths": []})
+            group["paths"].append(str(conflict["path"]))
+        for stable_targets, group in grouped.items():
+            worktrees = group["worktrees"]
+            paths = sorted(set(group["paths"]))
             worktree_paths = {str(item["path"]) for item in worktrees}
-            participants = ["@human"]
-            participants.extend(str(item["target"]) for item in worktrees)
+            participants = [str(item["target"]) for item in worktrees]
             participants.extend(str(member["target"]) for member in members if member["state"] != "offline" and str(member["worktree"]) in worktree_paths)
-            stable_targets = sorted(str(item["target"]) for item in worktrees)
-            digest = hashlib.sha256(f"{repo.room_id}\n{conflict['path']}\n{' '.join(stable_targets)}".encode()).hexdigest()[:12]
+            digest = hashlib.sha256(f"{repo.room_id}\n{' '.join(stable_targets)}".encode()).hexdigest()[:12]
             thread_id = "conflict-" + digest
             active_ids.add(thread_id)
             prompted = self.connection.execute("SELECT 1 FROM messages WHERE room_id=? AND topic=? AND sender='@chat-room' LIMIT 1", (repo.room_id, f"thread:{thread_id}")).fetchone() is not None
-            self.open_thread(repo, f"Potential conflict: {conflict['path']}", "preemptive file overlap", "@chat-room", participants, [str(conflict["path"])], "preemptive-conflict", thread_id)
+            title = f"Potential conflict: {paths[0]}" if len(paths) == 1 else f"Potential conflict: {len(paths)} files"
+            self.open_thread(repo, title, "preemptive file overlap", "@chat-room", participants, paths, "preemptive-conflict", thread_id, {"audience": "agents", "origin": "observed overlap"})
             if not prompted:
                 tags = " ".join(dict.fromkeys(participants))
+                path_summary = ", ".join(paths[:3]) + (f" and {len(paths) - 3} more" if len(paths) > 3 else "")
                 self.post_thread(
                     repo,
                     thread_id,
                     "@chat-room",
-                    f"{tags} coordination requested for {conflict['path']}. Confirm ownership, write order, and handoff here before either worktree changes this path again.",
+                    f"{tags} coordination suggested for {path_summary}. Confirm ownership, write order, and handoff in agent chatter before another write.",
                 )
         open_auto = self.connection.execute("SELECT id FROM threads WHERE room_id=? AND status='open' AND source='preemptive-conflict'", (repo.room_id,)).fetchall()
         stale = [str(row["id"]) for row in open_auto if str(row["id"]) not in active_ids]
@@ -1086,7 +1104,7 @@ def tool_definitions() -> List[Dict[str, Any]]:
         {"name": "room_options", "description": "List the indexed notification actions and policy options used by Chat Room.", "inputSchema": {"type": "object", "properties": {"cwd": cwd}}},
         {"name": "room_option_set", "description": "Add or update one machine-local indexed option without rebuilding the UI.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "namespace": {"type": "string"}, "key": {"type": "string"}, "value": {"type": "string"}, "metadata": {"type": "object"}}, "required": ["namespace", "key", "value"]}},
         {"name": "room_threads", "description": "List open manual and preemptive-conflict coordination threads.", "inputSchema": {"type": "object", "properties": {"cwd": cwd}}},
-        {"name": "room_thread_open", "description": "Open a durable team channel or temporary coordination channel for design direction, review, handoff, blocker, or conflict resolution.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "title": {"type": "string"}, "reason": {"type": "string"}, "lifetime": {"type": "string", "enum": ["durable", "temporary"]}, "participants": {"type": "array", "items": {"type": "string"}}, "paths": {"type": "array", "items": {"type": "string"}}}, "required": ["title", "reason"]}},
+        {"name": "room_thread_open", "description": "Open agent-only chatter or a human-in-the-loop question with a durable reason and origin.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "title": {"type": "string"}, "reason": {"type": "string"}, "audience": {"type": "string", "enum": ["agents", "human-loop"]}, "origin": {"type": "string"}, "lifetime": {"type": "string", "enum": ["durable", "temporary"]}, "participants": {"type": "array", "items": {"type": "string"}}, "paths": {"type": "array", "items": {"type": "string"}}}, "required": ["title", "reason"]}},
         {"name": "room_thread_close", "description": "Mark a coordination thread resolved without changing Git state.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "thread_id": {"type": "string"}}, "required": ["thread_id"]}},
         {"name": "room_identify", "description": "Assign an active session a semantic @handle.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "session_id": {"type": "string"}, "handle": {"type": "string"}}, "required": ["session_id", "handle"]}},
         {"name": "room_post", "description": "Post one value-free coordination message. Use thread_id for central routing, or tag active @handles and #worktrees ad hoc.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "sender": {"type": "string"}, "session_id": {"type": "string"}, "thread_id": {"type": "string"}, "recipients": {"type": "array", "items": {"type": "string"}}, "kind": {"type": "string", "enum": list(MESSAGE_KINDS)}, "topic": {"type": "string"}, "status": {"type": "string"}, "message": {"type": "string", "maxLength": 4000}}, "required": ["kind", "topic", "message"]}},
@@ -1105,7 +1123,8 @@ def execute_tool(store: RoomStore, name: str, args: Dict[str, Any]) -> Any:
     if name == "room_threads": return {"room_id": repo.room_id, "threads": store.sync_preemptive_conflicts(repo)}
     if name == "room_thread_open":
         source = "temporary-channel" if str(args.get("lifetime") or "durable") == "temporary" else "team-channel"
-        return store.open_thread(repo, str(args["title"]), str(args["reason"]), str(args.get("opener") or f"{client_name()}-session"), [str(x) for x in args.get("participants", [])], [str(x) for x in args.get("paths", [])], source)
+        opener = str(args.get("opener") or f"{client_name()}-session")
+        return store.open_thread(repo, str(args["title"]), str(args["reason"]), opener, [str(x) for x in args.get("participants", [])], [str(x) for x in args.get("paths", [])], source, metadata={"audience": str(args.get("audience") or "agents"), "origin": str(args.get("origin") or opener)})
     if name == "room_thread_close": return store.close_thread(repo, str(args["thread_id"]))
     if name == "room_identify": return store.claim_handle(repo, str(args["session_id"]), str(args["handle"]))
     if name == "room_post":
@@ -1219,7 +1238,7 @@ class RoomHandler(BaseHTTPRequestHandler):
                     value = store.route_notification(self.app.repo, str(body.get("title") or "Notification settlement"), str(body.get("alert_type") or "notification"), str(body.get("actor") or "@human"), str(body.get("action") or "investigate"), [str(x) for x in body.get("participants", [])], [str(x) for x in body.get("paths", [])])
                 elif path == "/api/threads":
                     source = "temporary-channel" if str(body.get("lifetime") or "durable") == "temporary" else "team-channel"
-                    value = store.open_thread(self.app.repo, str(body.get("title") or ""), str(body.get("reason") or "coordination"), "@human", [str(x) for x in body.get("participants", [])], [str(x) for x in body.get("paths", [])], source)
+                    value = store.open_thread(self.app.repo, str(body.get("title") or ""), str(body.get("reason") or "coordination"), "@human", [str(x) for x in body.get("participants", [])], [str(x) for x in body.get("paths", [])], source, metadata={"audience": str(body.get("audience") or "agents"), "origin": str(body.get("origin") or "human")})
                 elif path == "/api/thread-close":
                     value = store.close_thread(self.app.repo, str(body.get("thread_id") or ""))
                 elif body.get("thread_id"):
@@ -1467,7 +1486,7 @@ def parser() -> argparse.ArgumentParser:
         if name == "ui": command.add_argument("--host", default="127.0.0.1"); command.add_argument("--port", type=int, default=7391); command.add_argument("--events-port", type=int); command.add_argument("--hostname", default="chatroom.localhost"); command.add_argument("--no-open", action="store_true")
     post = sub.add_parser("post"); post.add_argument("--cwd"); post.add_argument("--sender", default="@human"); post.add_argument("--kind", choices=MESSAGE_KINDS, default="message"); post.add_argument("--topic", default="general"); post.add_argument("--status", default="posted"); post.add_argument("--recipient", action="append", default=[]); post.add_argument("--message", required=True)
     identify = sub.add_parser("identify"); identify.add_argument("--cwd"); identify.add_argument("--session", required=True); identify.add_argument("--handle", required=True)
-    thread_open = sub.add_parser("thread-open"); thread_open.add_argument("--cwd"); thread_open.add_argument("--title", required=True); thread_open.add_argument("--reason", default="coordination"); thread_open.add_argument("--lifetime", choices=("durable", "temporary"), default="durable"); thread_open.add_argument("--participant", action="append", default=[]); thread_open.add_argument("--path", action="append", default=[])
+    thread_open = sub.add_parser("thread-open"); thread_open.add_argument("--cwd"); thread_open.add_argument("--title", required=True); thread_open.add_argument("--reason", default="coordination"); thread_open.add_argument("--audience", choices=("agents", "human-loop"), default="agents"); thread_open.add_argument("--origin", default="human"); thread_open.add_argument("--lifetime", choices=("durable", "temporary"), default="durable"); thread_open.add_argument("--participant", action="append", default=[]); thread_open.add_argument("--path", action="append", default=[])
     thread_close = sub.add_parser("thread-close"); thread_close.add_argument("--cwd"); thread_close.add_argument("--thread", required=True)
     option_set = sub.add_parser("option-set"); option_set.add_argument("--cwd"); option_set.add_argument("--namespace", required=True); option_set.add_argument("--key", required=True); option_set.add_argument("--value", required=True); option_set.add_argument("--metadata", default="{}")
     service = sub.add_parser("service"); service_actions = service.add_subparsers(dest="service_action", required=True)
@@ -1499,7 +1518,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             elif args.command == "options": value = {"room_id": repo.room_id, "options": store.options()}
             elif args.command == "read": value = {"room_id": repo.room_id, "messages": store.read(repo.room_id, args.after_id, args.limit)}
             elif args.command == "identify": value = store.claim_handle(repo, args.session, args.handle)
-            elif args.command == "thread-open": value = store.open_thread(repo, args.title, args.reason, "@human", args.participant, args.path, "temporary-channel" if args.lifetime == "temporary" else "team-channel")
+            elif args.command == "thread-open": value = store.open_thread(repo, args.title, args.reason, "@human", args.participant, args.path, "temporary-channel" if args.lifetime == "temporary" else "team-channel", metadata={"audience": args.audience, "origin": args.origin})
             elif args.command == "thread-close": value = store.close_thread(repo, args.thread)
             elif args.command == "option-set":
                 try: metadata = json.loads(args.metadata)

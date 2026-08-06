@@ -3,7 +3,6 @@ const authHeaders = token ? { "X-Chat-Room-Token": token } : {};
 let currentView = { kind: "room", id: "room" };
 let roomData = null;
 let catalogData = { chats: [] };
-let routedAlert = null;
 let pendingImages = [];
 const renderSignatures = new Map();
 let eventsSocket = null;
@@ -12,7 +11,6 @@ let eventsRetry = null;
 let eventsFallback = null;
 let refreshQueued = false;
 let eventCount = 0;
-let alertsExpanded = false;
 let connectionFailures = 0;
 
 function changed(key, value) {
@@ -25,7 +23,6 @@ function changed(key, value) {
 const esc = value => String(value ?? "").replace(/[&<>"']/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[character]);
 const rich = value => esc(value).replace(/(^|\s)([@#][a-z0-9-]+)/gi, '$1<span class="tag">$2</span>');
 const time = value => value ? new Date(value).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "";
-const icon = name => `<svg class="alert-icon" aria-hidden="true"><use href="/icons.svg#${esc(name)}"></use></svg>`;
 
 async function request(url, options = {}) {
   const response = await fetch(url, { cache: "no-store", ...options, headers: { ...authHeaders, ...(options.headers || {}) } });
@@ -104,7 +101,7 @@ function renderRoomMessages(data) {
   const pane = document.querySelector("#messages");
   const stayAtBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 80;
   const previousTop = pane.scrollTop;
-  const messages = resetMessages(thread ? `${thread.reason} · ${thread.participants.join(' ') || 'no participants yet'}` : "All Chat Room activity is shown as read. Tag an actor or worktree directly, or open a coordination thread.");
+  const messages = resetMessages(thread ? `${thread.audience === 'human-loop' ? 'Human in the Loop' : 'Agent-only chatter'} · ${thread.reason} · from ${thread.origin}` : "Command Console combines room activity as read. Send to all active agents, one worker, or a human question thread.");
   for (const message of items) {
     const row = document.createElement("div");
     row.className = "msg";
@@ -116,39 +113,57 @@ function renderRoomMessages(data) {
 
 function renderThreads(threads) {
   const container = document.querySelector("#threads");
-  document.querySelector("#thread-count").textContent = threads.length;
-  if (!changed("threads", { selected: currentView.kind === "thread" ? currentView.id : null, threads })) return;
+  const chatter = threads.filter(thread => thread.audience !== "human-loop");
+  document.querySelector("#thread-count").textContent = chatter.length;
+  if (!changed("threads", { selected: currentView.kind === "thread" ? currentView.id : null, chatter })) return;
   const group = (label, lifetime) => {
-    const items = threads.filter(thread => thread.lifetime === lifetime);
+    const items = chatter.filter(thread => thread.lifetime === lifetime);
     if (!items.length) return "";
-    return `<div class="channel-group-title">${esc(label)} — ${items.length}</div>${items.map(thread => `<button class="thread-item ${currentView.kind === 'thread' && currentView.id === thread.id ? 'selected' : ''}" data-thread="${esc(thread.id)}"><span class="thread-mark">#</span><span><b>${esc(thread.title)}</b><small>${esc(thread.reason)} · ${thread.participants.length} involved</small></span></button>`).join("")}`;
+    const rows = items.map(thread => `<button class="thread-item ${currentView.kind === 'thread' && currentView.id === thread.id ? 'selected' : ''}" data-thread="${esc(thread.id)}"><span class="thread-mark">#</span><span><b>${esc(thread.title)}</b><small>${esc(thread.reason)} · ${thread.participants.length} participants · from ${esc(thread.origin)}</small></span></button>`).join("");
+    return lifetime === "temporary" ? `<details class="channel-fold"><summary>${esc(label)} — ${items.length}</summary>${rows}</details>` : `<div class="channel-group-title">${esc(label)} — ${items.length}</div>${rows}`;
   };
-  container.innerHTML = group("TEAM CHANNELS", "durable") + group("TEMP CHANNELS", "temporary");
+  container.innerHTML = group("TEAM CHATTER", "durable") + group("TEMP CHATTER", "temporary") || '<p class="nav-empty">No active agent chatter.</p>';
   container.querySelectorAll("[data-thread]").forEach(node => { node.onclick = () => openThread(node.dataset.thread); });
 }
 
-function renderAlerts(alerts) {
-  document.querySelector("#alert-count").textContent = alerts.length;
-  if (!changed("alerts", { alerts, alertsExpanded })) return;
-  const visible = alertsExpanded ? alerts : alerts.slice(0, 3);
-  const more = alerts.length > 3 ? `<button class="more-alerts" data-alert-toggle>${alertsExpanded ? "Show less" : `Show ${alerts.length - 3} more`}</button>` : "";
-  document.querySelector("#alerts").innerHTML = visible.map((alert, index) => `<article class="alert-item ${esc(alert.severity)}">${icon(alert.icon)}<div class="alert-copy"><b>${esc(alert.title)}</b><small>${esc(alert.detail)}</small></div><button data-alert="${index}">${alert.thread_id ? 'Open' : 'Route'}</button></article>`).join("") + more || '<p class="nav-empty">No coordination alerts.</p>';
-  document.querySelectorAll("[data-alert]").forEach(node => { node.onclick = () => settleAlert(alerts[Number(node.dataset.alert)]); });
-  const toggle = document.querySelector("[data-alert-toggle]");
-  if (toggle) toggle.onclick = () => { alertsExpanded = !alertsExpanded; renderSignatures.delete("alerts"); renderAlerts(alerts); };
+function renderHumanThreads(threads) {
+  const questions = threads.filter(thread => thread.audience === "human-loop");
+  document.querySelector("#human-count").textContent = questions.length;
+  if (!changed("human-threads", { selected: currentView.kind === "thread" ? currentView.id : null, questions })) return;
+  const container = document.querySelector("#human-threads");
+  container.innerHTML = questions.map(thread => `<button class="human-thread ${currentView.kind === 'thread' && currentView.id === thread.id ? 'selected' : ''}" data-thread="${esc(thread.id)}"><span class="human-mark">?</span><span><b>${esc(thread.title)}</b><small>${esc(thread.reason)} · from ${esc(thread.origin)}</small></span><em>OPEN</em></button>`).join("") || '<p class="nav-empty">No open questions.</p>';
+  container.querySelectorAll("[data-thread]").forEach(node => { node.onclick = () => openThread(node.dataset.thread); });
 }
 
-async function settleAlert(alert) {
-  if (alert.thread_id) { openThread(alert.thread_id); return; }
-  routedAlert = alert;
-  const actor = document.querySelector("#alert-actor");
-  const action = document.querySelector("#alert-action");
-  const agents = roomData?.targets?.agents || [];
-  actor.innerHTML = [`<option value="@human">Human · @human</option>`, ...agents.map(item => `<option value="${esc(item.target)}">${esc(String(item.role || 'agent').split(':')[0])} · ${esc(item.target)} · ${esc(item.worktree_target)}</option>`)].join("");
-  action.innerHTML = [...(roomData?.options?.worktree_action || [])].sort((left, right) => Number(left.metadata?.order || 999) - Number(right.metadata?.order || 999)).map(item => `<option value="${esc(item.key)}">${esc(item.value)}</option>`).join("");
-  document.querySelector("#alert-router-title").textContent = alert.title;
-  document.querySelector("#alert-router").hidden = false;
-  actor.focus();
+function activationSuggestions(alerts) {
+  const grouped = new Map();
+  for (const alert of alerts) {
+    if (alert.type !== "shared-worktree" && alert.type !== "file-overlap") continue;
+    const participants = (alert.participants || []).filter(target => target !== "@human").sort();
+    const key = `${alert.type}:${participants.join("|")}`;
+    const item = grouped.get(key) || { type: alert.type, participants, paths: [], alerts: [], title: alert.title };
+    item.paths.push(...(alert.paths || [])); item.alerts.push(alert); grouped.set(key, item);
+  }
+  return [...grouped.values()].map(item => ({ ...item, paths: [...new Set(item.paths)], title: item.type === "file-overlap" && item.paths.length > 1 ? `${item.paths.length} overlapping files` : item.title, reason: item.type === "file-overlap" ? "preemptive conflict" : "shared worktree" }));
+}
+
+function renderSuggestions(alerts) {
+  const suggestions = activationSuggestions(alerts);
+  if (!changed("suggestions", suggestions)) return;
+  const container = document.querySelector("#suggestions");
+  container.innerHTML = suggestions.map((item, index) => `<div class="suggestion"><span class="suggestion-dot"></span><span><b>${esc(item.title)}</b><small>${esc(item.reason)} · ${item.participants.length} participants${item.paths.length ? ` · ${item.paths.length} paths` : ''}</small></span><button type="button" data-suggestion="${index}" aria-label="Start chatter">＋</button></div>`).join("") || '<p class="nav-empty">No chatter suggested.</p>';
+  container.querySelectorAll("[data-suggestion]").forEach(node => { node.onclick = () => prepareChatter(suggestions[Number(node.dataset.suggestion)]); });
+}
+
+function prepareChatter(suggestion) {
+  document.querySelector("#thread-title").value = suggestion.title;
+  document.querySelector("#thread-reason").value = suggestion.reason;
+  document.querySelector("#thread-origin").value = "observed activity";
+  document.querySelector("#thread-lifetime").value = "temporary";
+  document.querySelector("#thread-participants").value = suggestion.participants.join(" ");
+  document.querySelector("#thread-paths").value = suggestion.paths.join(" ");
+  document.querySelector("#thread-form").hidden = false;
+  document.querySelector("#thread-title").focus();
 }
 
 function renderSnapshot(data) {
@@ -157,8 +172,9 @@ function renderSnapshot(data) {
   document.querySelector("#authority").textContent = `${data.status.project_identity} • advisory-only`;
   document.querySelector("#counts").textContent = `${data.messages.length} messages • ${data.status.members_online} active`;
   document.querySelector("#combined-count").textContent = data.messages.length;
-  renderAlerts(data.alerts || []);
+  renderSuggestions(data.alerts || []);
   renderThreads(data.threads || []);
+  renderHumanThreads(data.threads || []);
   const online = data.targets.agents.filter(agent => agent.state === "online");
   const idle = data.targets.agents.filter(agent => agent.state === "idle");
   const offline = data.targets.agents.filter(agent => agent.state === "offline");
@@ -176,21 +192,23 @@ function renderRoomView() {
   if (currentView.kind === "thread" && !thread) currentView = { kind: "room", id: "room" };
   const activeThread = currentView.kind === "thread" ? roomData.threads.find(item => item.id === currentView.id) : null;
   document.querySelector("#chat-pane").classList.remove("history-mode");
-  document.querySelector("#view-title").textContent = activeThread?.title || "All activity";
-  document.querySelector("#identity").textContent = activeThread ? `${activeThread.reason} · central ref ${activeThread.id}` : `${roomData.status.project_identity} · combined room`;
+  const agentOnly = activeThread?.audience === "agents";
+  document.querySelector("#view-title").textContent = activeThread?.title || "Command Console";
+  document.querySelector("#identity").textContent = activeThread ? `${activeThread.audience === 'human-loop' ? 'human in the loop' : 'agent-only chatter'} · ${activeThread.reason} · ${activeThread.id}` : `${roomData.status.project_identity} · all activity`;
   document.querySelector("#view-status").textContent = "● connected locally";
   document.querySelector("#close-thread").hidden = !activeThread;
   document.querySelector("#close-thread").textContent = activeThread?.lifetime === "temporary" ? "Resolve" : "Archive";
   document.querySelector("#rename-view").hidden = false;
-  document.querySelector("#compose-label").textContent = activeThread ? `thread ${activeThread.id} · routes to every participant` : "message as @human · ad hoc tagging is built in";
-  document.querySelector("#room-routing").hidden = false;
-  document.querySelector("#message").disabled = false;
-  document.querySelector("#send-message").disabled = false;
+  document.querySelector("#compose-label").textContent = agentOnly ? "agent-only chatter · visible to @human" : activeThread ? `human question · response returns to ${activeThread.origin}` : "message as @human · route to all or tag one worker";
+  document.querySelector("#room-routing").hidden = Boolean(activeThread);
+  document.querySelector("#message").disabled = agentOnly;
+  document.querySelector("#send-message").disabled = agentOnly;
   document.querySelector("#attach-image").disabled = true;
-  document.querySelector("#message").placeholder = activeThread ? "Message this coordination room…" : "Message the combined room. Tag an active @actor or #worktree.";
+  document.querySelector("#message").placeholder = agentOnly ? "Agent-only chatter is read-only here" : activeThread ? "Answer this question…" : "Message the command console. Tag an active @actor or #worktree.";
   document.querySelector("#combined-room").classList.toggle("active", !activeThread);
   renderRouting();
   renderThreads(roomData.threads || []);
+  renderHumanThreads(roomData.threads || []);
   renderRoomMessages(roomData);
 }
 
@@ -336,13 +354,15 @@ if (localStorage.getItem("chat-room-sidebar") === "collapsed") {
 }
 document.querySelector("#new-thread").onclick = () => { document.querySelector("#thread-form").hidden = false; document.querySelector("#thread-title").focus(); };
 document.querySelector("#cancel-thread").onclick = () => { document.querySelector("#thread-form").hidden = true; };
-document.querySelector("#cancel-alert").onclick = () => { document.querySelector("#alert-router").hidden = true; routedAlert = null; };
-document.querySelector("#alert-router").addEventListener("submit", async event => {
+document.querySelector("#new-human-thread").onclick = () => { document.querySelector("#human-thread-form").hidden = false; document.querySelector("#human-thread-title").focus(); };
+document.querySelector("#cancel-human-thread").onclick = () => { document.querySelector("#human-thread-form").hidden = true; };
+document.querySelector("#human-thread-form").addEventListener("submit", async event => {
   event.preventDefault();
-  if (!routedAlert) return;
   try {
-    const thread = await request("/api/route-alert", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: routedAlert.title, alert_type: routedAlert.type, actor: document.querySelector("#alert-actor").value, action: document.querySelector("#alert-action").value, participants: routedAlert.participants, paths: routedAlert.paths }) });
-    event.target.hidden = true; routedAlert = null;
+    const participants = document.querySelector("#human-thread-participants").value.trim().split(/\s+/).filter(Boolean);
+    const paths = document.querySelector("#human-thread-paths").value.trim().split(/\s+/).filter(Boolean);
+    const thread = await request("/api/threads", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: document.querySelector("#human-thread-title").value, reason: document.querySelector("#human-thread-reason").value, lifetime: "durable", audience: "human-loop", origin: "human question", participants, paths }) });
+    event.target.reset(); event.target.hidden = true;
     await refreshRoom(); openThread(thread.id); clearError();
   } catch (error) { showError(error); }
 });
@@ -351,7 +371,7 @@ document.querySelector("#thread-form").addEventListener("submit", async event =>
   try {
     const participants = document.querySelector("#thread-participants").value.trim().split(/\s+/).filter(Boolean);
     const paths = document.querySelector("#thread-paths").value.trim().split(/\s+/).filter(Boolean);
-    const thread = await request("/api/threads", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: document.querySelector("#thread-title").value, reason: document.querySelector("#thread-reason").value, lifetime: document.querySelector("#thread-lifetime").value, participants, paths }) });
+    const thread = await request("/api/threads", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: document.querySelector("#thread-title").value, reason: document.querySelector("#thread-reason").value, origin: document.querySelector("#thread-origin").value, lifetime: document.querySelector("#thread-lifetime").value, audience: "agents", participants, paths }) });
     event.target.reset(); event.target.hidden = true;
     await refreshRoom(); openThread(thread.id); clearError();
   } catch (error) { showError(error); }
@@ -396,7 +416,7 @@ function renderRouting() {
   const scope = document.querySelector("#send-scope");
   const target = document.querySelector("#send-target");
   const thread = currentView.kind === "thread" ? roomData.threads.find(item => item.id === currentView.id) : null;
-  scope.options[0].textContent = thread ? `Channel · ${thread.title}` : "Channel · All activity";
+  scope.options[0].textContent = thread ? `Thread · ${thread.title}` : "Console · all activity";
   const agents = roomData.targets?.agents || [];
   const selected = target.value;
   if (changed("routing-agents", agents.map(agent => [agent.target, agent.worktree_target]))) target.innerHTML = agents.map(agent => `<option value="${esc(agent.target)}">${esc(agent.target)} · ${esc(agent.worktree_target)}</option>`).join("");
