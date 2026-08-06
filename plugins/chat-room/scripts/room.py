@@ -79,6 +79,22 @@ CONFLICT_SCANS: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
 CONFLICT_SCANS_RUNNING: Set[str] = set()
 
 
+# One source of truth for the shape. `_migrate` applies it and the doctor builds a throwaway
+# reference database from it, so "expected columns" can never drift from what is created.
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS rooms(room_id TEXT PRIMARY KEY,project_identity TEXT NOT NULL,common_dir TEXT NOT NULL,repository_root TEXT NOT NULL,created_at TEXT NOT NULL,last_seen_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT,room_id TEXT NOT NULL,timestamp TEXT NOT NULL,session_id TEXT,sender TEXT NOT NULL,recipients_json TEXT NOT NULL,kind TEXT NOT NULL,topic TEXT NOT NULL,status TEXT NOT NULL,message TEXT NOT NULL,cwd TEXT,worktree TEXT,branch TEXT,head TEXT,metadata_json TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS messages_room_id_id ON messages(room_id,id);
+CREATE TABLE IF NOT EXISTS presence(room_id TEXT NOT NULL,participant_id TEXT NOT NULL,session_id TEXT,agent_id TEXT,role TEXT NOT NULL,state TEXT NOT NULL,cwd TEXT NOT NULL,worktree TEXT NOT NULL,branch TEXT,head TEXT,started_at TEXT NOT NULL,seen_at TEXT NOT NULL,last_event TEXT NOT NULL,handle TEXT,wake_endpoint TEXT,PRIMARY KEY(room_id,participant_id));
+CREATE TABLE IF NOT EXISTS handle_claims(room_id TEXT NOT NULL,participant_id TEXT NOT NULL,claimed_at TEXT NOT NULL,PRIMARY KEY(room_id,participant_id));
+CREATE TABLE IF NOT EXISTS cursors(room_id TEXT NOT NULL,participant_id TEXT NOT NULL,last_message_id INTEGER NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(room_id,participant_id));
+CREATE TABLE IF NOT EXISTS threads(id TEXT PRIMARY KEY,room_id TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,status TEXT NOT NULL,title TEXT NOT NULL,reason TEXT NOT NULL,opener TEXT NOT NULL,participants_json TEXT NOT NULL,paths_json TEXT NOT NULL,source TEXT NOT NULL,metadata_json TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS threads_room_status_updated ON threads(room_id,status,updated_at DESC);
+CREATE TABLE IF NOT EXISTS option_index(namespace TEXT NOT NULL,key TEXT NOT NULL,value TEXT NOT NULL,metadata_json TEXT NOT NULL,PRIMARY KEY(namespace,key));
+"""
+
+
 class RoomError(RuntimeError):
     pass
 
@@ -812,6 +828,7 @@ def start_chat_delivery(data_dir: Path, repo: Repository, client: str, session_i
 
 class RoomStore:
     def __init__(self, data_dir: Path) -> None:
+        self.behind = False
         self.data_dir = data_dir.expanduser().resolve()
         old = os.umask(0o077)
         try:
@@ -832,19 +849,28 @@ class RoomStore:
     def __enter__(self) -> "RoomStore": return self
     def __exit__(self, *_args: Any) -> None: self.connection.close()
 
+    def installed_schema(self) -> int:
+        try:
+            row = self.connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
+        except sqlite3.OperationalError:
+            return 0
+        return int(str(row["value"])) if row and str(row["value"]).isdigit() else 0
+
+    def _require_writable(self) -> None:
+        if self.behind:
+            raise RoomError(
+                f"this room database was written by a newer chat-room (schema {self.installed_schema()}, this copy speaks {SCHEMA_VERSION}); "
+                "reads still work — upgrade this copy to write. Run `chat-room doctor` for the details."
+            )
+
     def _migrate(self) -> None:
-        self.connection.executescript("""
-        CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS rooms(room_id TEXT PRIMARY KEY,project_identity TEXT NOT NULL,common_dir TEXT NOT NULL,repository_root TEXT NOT NULL,created_at TEXT NOT NULL,last_seen_at TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT,room_id TEXT NOT NULL,timestamp TEXT NOT NULL,session_id TEXT,sender TEXT NOT NULL,recipients_json TEXT NOT NULL,kind TEXT NOT NULL,topic TEXT NOT NULL,status TEXT NOT NULL,message TEXT NOT NULL,cwd TEXT,worktree TEXT,branch TEXT,head TEXT,metadata_json TEXT NOT NULL);
-        CREATE INDEX IF NOT EXISTS messages_room_id_id ON messages(room_id,id);
-        CREATE TABLE IF NOT EXISTS presence(room_id TEXT NOT NULL,participant_id TEXT NOT NULL,session_id TEXT,agent_id TEXT,role TEXT NOT NULL,state TEXT NOT NULL,cwd TEXT NOT NULL,worktree TEXT NOT NULL,branch TEXT,head TEXT,started_at TEXT NOT NULL,seen_at TEXT NOT NULL,last_event TEXT NOT NULL,handle TEXT,wake_endpoint TEXT,PRIMARY KEY(room_id,participant_id));
-        CREATE TABLE IF NOT EXISTS handle_claims(room_id TEXT NOT NULL,participant_id TEXT NOT NULL,claimed_at TEXT NOT NULL,PRIMARY KEY(room_id,participant_id));
-        CREATE TABLE IF NOT EXISTS cursors(room_id TEXT NOT NULL,participant_id TEXT NOT NULL,last_message_id INTEGER NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(room_id,participant_id));
-        CREATE TABLE IF NOT EXISTS threads(id TEXT PRIMARY KEY,room_id TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,status TEXT NOT NULL,title TEXT NOT NULL,reason TEXT NOT NULL,opener TEXT NOT NULL,participants_json TEXT NOT NULL,paths_json TEXT NOT NULL,source TEXT NOT NULL,metadata_json TEXT NOT NULL);
-        CREATE INDEX IF NOT EXISTS threads_room_status_updated ON threads(room_id,status,updated_at DESC);
-        CREATE TABLE IF NOT EXISTS option_index(namespace TEXT NOT NULL,key TEXT NOT NULL,value TEXT NOT NULL,metadata_json TEXT NOT NULL,PRIMARY KEY(namespace,key));
-        """)
+        installed = self.installed_schema()
+        if installed > SCHEMA_VERSION:
+            # A newer chat-room owns this database. Reading stays safe; writing would put back
+            # a shape it has already moved past, which is how one stale copy corrupts everyone.
+            self.behind = True
+            return
+        self.connection.executescript(SCHEMA_SQL)
         defaults = (
             ("worktree_action", "investigate", "Investigate unmerged work", {"order": 10, "prompt": "Inspect the referenced worktree or conflict, report unique unmerged work and evidence, and recommend a safe disposition. Do not mutate Git."}),
             ("worktree_action", "consolidate", "Consolidate", {"order": 20, "prompt": "Compare the referenced work against current authority, identify the smallest consumer-closed consolidation, and report the exact safe sequence before changing Git."}),
@@ -874,6 +900,8 @@ class RoomStore:
         self.connection.commit()
 
     def register_room(self, repo: Repository) -> None:
+        if self.behind:
+            return  # A heartbeat, not user intent; a stale copy simply stops touching it.
         now = utc_now()
         self.connection.execute("""INSERT INTO rooms(room_id,project_identity,common_dir,repository_root,created_at,last_seen_at) VALUES(?,?,?,?,?,?) ON CONFLICT(room_id) DO UPDATE SET project_identity=excluded.project_identity,common_dir=excluded.common_dir,repository_root=excluded.repository_root,last_seen_at=excluded.last_seen_at""", (repo.room_id, repo.project_identity, str(repo.common_dir), str(repo.worktree), now, now))
         self.connection.commit()
@@ -892,6 +920,7 @@ class RoomStore:
         return {"namespace": row["namespace"], "key": row["key"], "value": row["value"], "metadata": json.loads(row["metadata_json"])}
 
     def set_option(self, namespace: str, key: str, value: str, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        self._require_writable()
         clean_namespace = re.sub(r"[^a-z0-9_-]+", "-", namespace.strip().lower()).strip("-") or "options"
         clean_key = slug(key, "option")
         clean_value = concise(ensure_value_free(value), 160)
@@ -947,6 +976,7 @@ class RoomStore:
         return f"{preferred}-{hashlib.sha256(participant_id.encode()).hexdigest()[:6]}"
 
     def upsert_presence(self, repo: Repository, participant_id: str, session_id: Optional[str], agent_id: Optional[str], role: str, state: str, event: str, wake_endpoint: Optional[str] = None) -> None:
+        self._require_writable()
         self.register_room(repo)
         now = utc_now()
         previous = self.connection.execute("SELECT handle,started_at FROM presence WHERE room_id=? AND participant_id=?", (repo.room_id, participant_id)).fetchone()
@@ -976,6 +1006,7 @@ class RoomStore:
         return result
 
     def claim_handle(self, repo: Repository, session_ref: str, requested: str) -> Dict[str, Any]:
+        self._require_writable()
         handle = target_token(requested)[1:]
         active = [m for m in self.members(repo.room_id) if m["state"] != "offline"]
         matches = [m for m in active if str(m.get("session_id") or "").startswith(session_ref) or str(m["participant_id"]).startswith(session_ref)]
@@ -1023,6 +1054,7 @@ class RoomStore:
         return value
 
     def open_thread(self, repo: Repository, title: str, reason: str, opener: str, participants: Sequence[str], paths: Sequence[str], source: str = "manual", thread_id: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        self._require_writable()
         heading = concise(ensure_value_free(title), 120)
         why = concise(ensure_value_free(reason), 240)
         thread_metadata = dict(metadata or {})
@@ -1054,6 +1086,7 @@ class RoomStore:
         return self.thread(repo, identifier)
 
     def close_thread(self, repo: Repository, thread_id: str) -> Dict[str, Any]:
+        self._require_writable()
         thread = self.thread(repo, thread_id)
         status = "resolved" if thread["lifetime"] == "temporary" else "archived"
         self.connection.execute("UPDATE threads SET status=?,updated_at=? WHERE room_id=? AND id=?", (status, utc_now(), repo.room_id, thread_id))
@@ -1120,6 +1153,7 @@ class RoomStore:
         return requested
 
     def post(self, repo: Repository, sender: str, kind: str, topic: str, status: str, message: str, recipients: Sequence[str], session_id: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        self._require_writable()
         if kind not in MESSAGE_KINDS: raise RoomError("unsupported message kind")
         self.register_room(repo)
         body = ensure_value_free(message)
@@ -1141,6 +1175,8 @@ class RoomStore:
         return int(row["last_message_id"]) if row else 0
 
     def advance_cursor(self, room_id: str, participant_id: str, message_id: int) -> None:
+        if self.behind:
+            return  # Context still injects; it just replays until this copy is upgraded.
         self.connection.execute("INSERT INTO cursors(room_id,participant_id,last_message_id,updated_at) VALUES(?,?,?,?) ON CONFLICT(room_id,participant_id) DO UPDATE SET last_message_id=excluded.last_message_id,updated_at=excluded.updated_at", (room_id, participant_id, int(message_id), utc_now()))
         self.connection.commit()
 
@@ -1647,6 +1683,79 @@ def run_codex(data_dir: Path, arguments: Sequence[str]) -> int:
         if path.exists() and stat.S_ISSOCK(path.stat().st_mode): path.unlink()
 
 
+def reference_columns() -> Dict[str, List[str]]:
+    """The shape this build expects, built from the very script that creates it."""
+    reference = sqlite3.connect(":memory:")
+    try:
+        reference.executescript(SCHEMA_SQL)
+        tables = sorted(row[0] for row in reference.execute("SELECT name FROM sqlite_master WHERE type='table'"))
+        return {table: [row[1] for row in reference.execute(f"PRAGMA table_info({table})")] for table in tables}
+    finally:
+        reference.close()
+
+
+def launcher_report() -> Dict[str, Any]:
+    launcher = find_cli_executable(PLUGIN_NAME)
+    if not launcher:
+        return {"path": None, "version": None}
+    try:
+        result = subprocess.run([launcher, "--version"], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return {"path": launcher, "version": None}
+    # Anything that predates --version answers with an argparse usage error, not a version.
+    reported = result.stdout.strip() if result.returncode == 0 else ""
+    return {"path": launcher, "version": reported or None, "predates_version_flag": result.returncode != 0}
+
+
+def diagnose(data_dir: Path, repair: bool = False) -> Dict[str, Any]:
+    """Answer 'why is the room broken' without needing to read the source."""
+    database = data_dir.expanduser().resolve() / "chat-room.sqlite3"
+    report: Dict[str, Any] = {
+        "version": VERSION, "schema_version": SCHEMA_VERSION,
+        "python": sys.version.split()[0], "platform": sys.platform,
+        "data_dir": str(data_dir.expanduser().resolve()), "database": str(database),
+        "launcher": launcher_report(), "findings": [],
+    }
+    findings: List[Dict[str, str]] = report["findings"]
+    reported = str(report["launcher"]["version"] or "")
+    if report["launcher"].get("predates_version_flag"):
+        findings.append({"severity": "warning", "detail": f"the installed launcher at {report['launcher']['path']} predates --version, so it is older than {VERSION}; hooks and the browser room are running different code. Reinstall it from this checkout."})
+    elif reported and VERSION not in reported:
+        findings.append({"severity": "warning", "detail": f"the installed launcher reports {reported!r} while this copy is {VERSION}; hooks and the browser room may be running different code"})
+    if not database.exists():
+        report["installed_schema"] = None
+        findings.append({"severity": "info", "detail": "no room database yet; it is created on first use"})
+        return report
+    if repair:
+        # The migration is the repair: it narrows any shape a newer pre-release widened.
+        with RoomStore(data_dir):
+            pass
+    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    try:
+        row = connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
+        installed = int(str(row[0])) if row and str(row[0]).isdigit() else 0
+        report["installed_schema"] = installed
+        if installed > SCHEMA_VERSION:
+            findings.append({"severity": "critical", "detail": f"the database is schema {installed} but this copy speaks {SCHEMA_VERSION}; this copy is behind and refuses to write. Upgrade it."})
+        drift: Dict[str, Dict[str, List[str]]] = {}
+        for table, expected in reference_columns().items():
+            actual = [item[1] for item in connection.execute(f"PRAGMA table_info({table})")]
+            if not actual:
+                continue
+            unexpected = [name for name in actual if name not in expected]
+            absent = [name for name in expected if name not in actual]
+            if unexpected or absent:
+                drift[table] = {"unexpected": unexpected, "absent": absent}
+        report["column_drift"] = drift
+        for table, delta in drift.items():
+            findings.append({"severity": "critical", "detail": f"{table} carries unexpected {delta['unexpected']} and is missing {delta['absent']}; any version writing it positionally will fail. Run `chat-room doctor --repair`."})
+    finally:
+        connection.close()
+    if not findings:
+        findings.append({"severity": "ok", "detail": "the room database matches this build"})
+    return report
+
+
 def print_message(item: Dict[str, Any]) -> None:
     targets = " -> " + ",".join(item["recipients"]) if item["recipients"] else ""
     print(f"[{item['id']}] {item['timestamp']} {item['kind'].upper()} {item['sender']}{targets} {item['topic']} [{item['status']}]\n  {item['message']}")
@@ -1688,7 +1797,9 @@ def run_chat(store: RoomStore, repo: Repository, sender: str) -> int:
 def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(prog="chat-room", description="Local chat for humans, coding agents, and Git worktrees")
     value.add_argument("--data-dir", type=Path, default=default_data_dir())
+    value.add_argument("--version", action="version", version=f"{PLUGIN_NAME} {VERSION} (schema {SCHEMA_VERSION})")
     sub = value.add_subparsers(dest="command", required=True)
+    doctor = sub.add_parser("doctor"); doctor.add_argument("--cwd"); doctor.add_argument("--repair", action="store_true")
     for name in ("status", "targets", "members", "threads", "options", "read", "chat", "ui"):
         command = sub.add_parser(name); command.add_argument("--cwd")
         if name == "read": command.add_argument("--after-id", type=int, default=0); command.add_argument("--limit", type=int, default=50)
@@ -1713,6 +1824,10 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser().parse_args(argv)
     try:
+        if args.command == "doctor":
+            report = diagnose(args.data_dir, args.repair)
+            print(json.dumps(report, indent=2, sort_keys=True))
+            return 1 if any(item["severity"] == "critical" for item in report["findings"]) else 0
         if args.command == "hook": return run_hook(args.data_dir)
         if args.command == "mcp": return run_mcp(args.data_dir)
         if args.command == "codex": return run_codex(args.data_dir, args.args)

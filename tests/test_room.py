@@ -201,6 +201,63 @@ class RoomTests(unittest.TestCase):
             self.assertEqual(room.merge_conflict_paths(repo, "one", "one"), set())
             self.assertEqual(room.merge_conflict_paths(repo, "one", "no-such-branch"), set())
 
+    def test_a_copy_behind_the_database_reads_but_refuses_to_write(self):
+        repo = self.repo()
+        with tempfile.TemporaryDirectory() as temp:
+            with room.RoomStore(Path(temp)) as store:
+                store.upsert_presence(repo, "session:one", "one", None, "claude:lane", "online", "SessionStart")
+                with mock.patch.object(room, "list_worktree_references", return_value=[]):
+                    store.post(repo, "@human", "message", "general", "posted", "written by the newer copy", [])
+            # Stand in for a newer chat-room having owned this database first.
+            ahead = sqlite3.connect(str(Path(temp) / "chat-room.sqlite3"))
+            ahead.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('schema_version',?)", (str(room.SCHEMA_VERSION + 1),))
+            ahead.commit(); ahead.close()
+            with room.RoomStore(Path(temp)) as store:
+                self.assertTrue(store.behind)
+                # Reading is always safe.
+                self.assertEqual([item["message"] for item in store.recent(repo.room_id)], ["written by the newer copy"])
+                self.assertEqual(len(store.members(repo.room_id)), 1)
+                # Writing would put back a shape the database has moved past.
+                for write in (
+                    lambda: store.upsert_presence(repo, "session:two", "two", None, "claude:lane", "online", "SessionStart"),
+                    lambda: store.post(repo, "@human", "message", "general", "posted", "nope", []),
+                    lambda: store.set_option("delivery_policy", "wake_on_tag", "off"),
+                ):
+                    with self.assertRaises(room.RoomError):
+                        write()
+                # Heartbeats go quiet rather than raising, so context injection still works.
+                store.advance_cursor(repo.room_id, "session:one", 1)
+                store.register_room(repo)
+
+    def test_the_schema_record_never_moves_backwards(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with room.RoomStore(Path(temp)) as store:
+                self.assertEqual(store.installed_schema(), room.SCHEMA_VERSION)
+            # An older copy of this script opening the same database must not rewind the record,
+            # which is how a stale binary silently re-enables migrations that already ran.
+            with mock.patch.object(room, "SCHEMA_VERSION", room.SCHEMA_VERSION - 1):
+                with room.RoomStore(Path(temp)) as older:
+                    self.assertTrue(older.behind)
+            with room.RoomStore(Path(temp)) as store:
+                self.assertEqual(store.installed_schema(), room.SCHEMA_VERSION)
+                self.assertFalse(store.behind)
+
+    def test_doctor_names_column_drift_and_repairs_it(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with room.RoomStore(Path(temp)):
+                pass
+            widened = sqlite3.connect(str(Path(temp) / "chat-room.sqlite3"))
+            widened.execute("ALTER TABLE presence ADD COLUMN claimed INTEGER NOT NULL DEFAULT 0")
+            widened.commit(); widened.close()
+
+            with mock.patch.object(room, "find_cli_executable", return_value=None):
+                report = room.diagnose(Path(temp))
+                self.assertEqual(report["column_drift"]["presence"]["unexpected"], ["claimed"])
+                self.assertTrue(any(item["severity"] == "critical" for item in report["findings"]))
+                repaired = room.diagnose(Path(temp), repair=True)
+            self.assertEqual(repaired["column_drift"], {})
+            self.assertEqual([item["severity"] for item in repaired["findings"]], ["ok"])
+
     def test_shared_tables_are_never_written_positionally(self):
         # Several versions of this script share one database on a machine. A positional
         # INSERT couples every writer to the exact column count, so the next added column
