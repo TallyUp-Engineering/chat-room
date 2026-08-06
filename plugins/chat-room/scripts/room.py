@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import errno
 import hashlib
 import json
 import os
@@ -30,6 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
 
 
 PLUGIN_NAME = "chat-room"
@@ -1270,6 +1272,17 @@ class RoomHTTPServer(ThreadingHTTPServer):
         super().__init__(address, RoomHandler); self.repo = repo; self.data_dir = data_dir; self.static_dir = static_dir; self.token = token; self.hostname = hostname; self.events_port = events_port; self.event_hub = event_hub
 
 
+def running_room_url(port: int, hostname: str) -> Optional[str]:
+    url = f"http://{hostname}:{port}/"
+    request = Request(f"http://127.0.0.1:{port}/", headers={"Host": f"{hostname}:{port}"})
+    try:
+        with urlopen(request, timeout=.6) as response:
+            payload = response.read(4096)
+        return url if b"<title>Chat Room</title>" in payload else None
+    except (OSError, ValueError):
+        return None
+
+
 def run_ui(data_dir: Path, cwd: Optional[str], host: str, port: int, hostname: str, events_port: Optional[int], no_open: bool) -> int:
     with RoomStore(data_dir) as store: repo = select_repository(store, cwd); store.register_room(repo)
     if host not in ("127.0.0.1", "localhost", "::1"): raise RoomError("the UI binds only to loopback")
@@ -1277,7 +1290,17 @@ def run_ui(data_dir: Path, cwd: Optional[str], host: str, port: int, hostname: s
     if hostname != "localhost" and not hostname.endswith(".localhost"): raise RoomError("the browser hostname must be localhost or end in .localhost")
     token = hashlib.sha256(os.urandom(32)).hexdigest(); static_dir = Path(__file__).resolve().parents[1] / "assets"
     hub = EventHub()
-    provisional = RoomHTTPServer((host, port), repo, data_dir, static_dir, token, hostname, 0, hub)
+    try:
+        provisional = RoomHTTPServer((host, port), repo, data_dir, static_dir, token, hostname, 0, hub)
+    except OSError as error:
+        if error.errno == errno.EADDRINUSE:
+            existing = running_room_url(port, hostname)
+            if existing:
+                print(f"Chat Room is already running\n{existing}")
+                if not no_open: webbrowser.open(existing)
+                return 0
+            raise RoomError(f"local port {port} is already used by another process; try: chat-room ui --port {port + 2} --events-port {port + 3}") from None
+        raise RoomError(f"could not start the local Chat Room UI: {error}") from None
     http_port = int(provisional.server_address[1]); selected_events_port = int(events_port or (http_port + 1))
     event_server = RoomEventServer(host, selected_events_port, hostname, http_port, token, hub)
     try: event_server.start()

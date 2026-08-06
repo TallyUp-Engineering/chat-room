@@ -165,6 +165,13 @@ class RoomTests(unittest.TestCase):
         self.assertEqual(args.hostname, "chatroom.localhost")
         self.assertEqual(args.port, 7391)
 
+    def test_ui_reuses_an_already_running_chat_room_without_traceback(self):
+        occupied = OSError(room.errno.EADDRINUSE, "Address already in use")
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(room, "select_repository", return_value=self.repo()), mock.patch.object(room, "RoomHTTPServer", side_effect=occupied), mock.patch.object(room, "running_room_url", return_value="http://chatroom.localhost:7391/"), mock.patch.object(room.webbrowser, "open") as opened, mock.patch("sys.stdout", io.StringIO()) as output:
+            self.assertEqual(room.run_ui(Path(temp), None, "127.0.0.1", 7391, "chatroom.localhost", None, False), 0)
+        opened.assert_called_once_with("http://chatroom.localhost:7391/")
+        self.assertIn("already running", output.getvalue())
+
     def test_chat_recency_defines_recent_and_inactive(self):
         self.assertEqual(room.chat_recency(room.utc_now()), "recent")
         self.assertEqual(room.chat_recency("2000-01-01T00:00:00Z"), "inactive")
