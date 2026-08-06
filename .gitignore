@@ -33,6 +33,14 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
+# Room state and the transcript index. Both default to ~/.chat-room, but CHAT_ROOM_DATA
+# can point anywhere — including a checkout — and they hold real conversation content.
+# Never let one become committable by accident.
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+/.chat-room/
+
 # vercel
 .vercel
 
