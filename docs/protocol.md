@@ -12,6 +12,8 @@ Chat Room is a local coordination plane with five durable concepts.
 
 - A room is advisory and never grants authority.
 - `@handle` resolves only to an observed active or idle session, and is settled when presence is written so a target never migrates between sessions.
+- A session is `online`, `idle`, `blocked`, or `offline`. `blocked` is derived, not declared: a quiet session that opened a question still waiting on a human. Nothing self-reports being stuck.
+- Merge safety is reported before a merge is attempted, never inferred from whether files look similar.
 - `#worktree` resolves independently of agent presence.
 - An explicit mention can carry a message into a supported idle session; it cannot interrupt an active turn.
 - Unknown targets and credential-shaped messages fail closed.
@@ -39,6 +41,7 @@ Exposed over stdio MCP. Inputs and outputs are JSON; the message schema is `chat
 | `room_post` | Post one value-free coordination message. |
 | `room_session_start` | Open new agent work in a worktree of this project. |
 | `room_session_stop` | Interrupt a local turn this room started. |
+| `room_ready` | Which worktree branches merge cleanly into the integration branch, and which collide. |
 | `room_search` | Search room messages, or indexed transcripts with `scope: chats`. |
 | `room_handoff` | Post a structured handoff. |
 
@@ -64,7 +67,6 @@ route below requires the unguessable per-process local token**, supplied as the
 | `/api/threads` | Open a chatter thread or a human-in-the-loop question. |
 | `/api/thread-close` | Resolve or archive a thread. |
 | `/api/chat-send` | Continue a local conversation through its vendor CLI. |
-| `/api/route-alert` | Route a notification to a tagged thread. |
 | `/api/rename` | Machine-local rename overlay for a room, channel, or chat. |
 | `/api/session-start` | Start a new local agent session in a worktree. |
 | `/api/session-stop` | Interrupt a turn this room started. |

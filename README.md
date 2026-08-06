@@ -47,6 +47,25 @@ Under every value the room refuses to deliver its own `@chat-room` chatter, to e
 into the session that sent it, to overlap a turn already running, or to deliver twice inside 60
 seconds. Those four guards are what stop two tagged agents from billing each other in a loop.
 
+### Knowing where things stand
+
+Three questions get harder with every extra agent, and none of them are answerable by
+looking at a list of sessions:
+
+```sh
+chat-room ready            # which branches merge cleanly into main, and which collide
+chat-room targets          # who is where, and how much is uncommitted in each worktree
+```
+
+`ready` asks Git for a real merge result per branch rather than guessing from which files
+look busy, so a collision is visible before anyone attempts to land. `room_ready` exposes
+the same thing to agents.
+
+Presence gained a fourth state for the same reason. A session that asked a question and is
+waiting looks exactly like one that finished — both are quiet. A quiet session with an
+unanswered question of its own now reports `blocked`, so "who needs me" stops being a
+guess. Nothing self-reports being stuck; it is derived from the question still being open.
+
 ### Searching inside conversations
 
 Room search covers coordination messages. To search inside the transcripts themselves, install

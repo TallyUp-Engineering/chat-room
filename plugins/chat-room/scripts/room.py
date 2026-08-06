@@ -41,10 +41,9 @@ ACTIVE_WINDOW_SECONDS = 30 * 60
 WAKE_ENDPOINT_ENV = "CHAT_ROOM_WAKE_ENDPOINT"
 CLIENT_ENV = "CHAT_ROOM_CLIENT"
 DATA_ENV = "CHAT_ROOM_DATA"
-MESSAGE_KINDS = (
-    "allocation", "request", "decision", "observation", "update",
-    "blocker", "defect", "handoff", "authority", "proposal", "message",
-)
+# Only these are ever written. Eight further kinds shipped unused, which made the enum a
+# menu nobody chose from rather than a vocabulary that meant anything.
+MESSAGE_KINDS = ("message", "allocation", "handoff")
 CONTEXT_EVENTS = ("SessionStart", "UserPromptSubmit", "SubagentStart")
 SECRET_PATTERNS = (
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
@@ -79,7 +78,7 @@ SNAPSHOT_MESSAGE_LIMIT = 300
 HTTP_READ_ROUTES = ("/api/snapshot", "/api/search", "/api/chats", "/api/chat")
 HTTP_WRITE_ROUTES = (
     "/api/messages", "/api/threads", "/api/thread-close", "/api/chat-send",
-    "/api/route-alert", "/api/rename", "/api/session-start", "/api/session-stop",
+    "/api/rename", "/api/session-start", "/api/session-stop",
 )
 CONFLICT_SCAN_LOCK = threading.Lock()
 CONFLICT_SCANS: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
@@ -492,7 +491,7 @@ def preemptive_conflicts(repo: Repository) -> List[Dict[str, Any]]:
         return cached[1] if cached else []
 
 
-def coordination_alerts(targets: Dict[str, Any], threads: Sequence[Dict[str, Any]], options: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> List[Dict[str, Any]]:
+def coordination_alerts(targets: Dict[str, Any], threads: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     alerts: List[Dict[str, Any]] = []
     agents = list(targets.get("agents") or [])
     for worktree in targets.get("worktrees") or []:
@@ -523,20 +522,6 @@ def coordination_alerts(targets: Dict[str, Any], threads: Sequence[Dict[str, Any
             "id": f"{alert_type}-{thread['id']}", "type": alert_type, "severity": severity, "icon": icon,
             "title": thread["title"], "detail": thread["reason"], "participants": thread["participants"],
             "paths": thread["paths"], "thread_id": thread["id"],
-        })
-    policy = next((item for item in (options or {}).get("notification_policy", []) if item.get("key") == "stale_worktree_days"), {"value": "30"})
-    try:
-        stale_days = max(1, int(str(policy.get("value") or "30")))
-    except ValueError:
-        stale_days = 30
-    stale = [worktree for worktree in targets.get("worktrees") or [] if not int(worktree.get("active_agents") or 0) and isinstance(worktree.get("age_days"), int) and int(worktree["age_days"]) >= stale_days]
-    if stale:
-        alerts.append({
-            "id": "potentially-stale-worktrees", "type": "stale-worktrees", "severity": "attention", "icon": "stale-worktree",
-            "title": f"{len(stale)} potentially stale worktree{'s' if len(stale) != 1 else ''}",
-            "detail": f"No active actor and last branch commit at least {stale_days} days ago. Route an investigation before disposition.",
-            "participants": ["@human", *[str(item["target"]) for item in stale]],
-            "paths": [str(item["path"]) for item in stale], "thread_id": None,
         })
     return alerts
 
@@ -879,10 +864,6 @@ class RoomStore:
             return
         self.connection.executescript(SCHEMA_SQL)
         defaults = (
-            ("worktree_action", "investigate", "Investigate unmerged work", {"order": 10, "prompt": "Inspect the referenced worktree or conflict, report unique unmerged work and evidence, and recommend a safe disposition. Do not mutate Git."}),
-            ("worktree_action", "consolidate", "Consolidate", {"order": 20, "prompt": "Compare the referenced work against current authority, identify the smallest consumer-closed consolidation, and report the exact safe sequence before changing Git."}),
-            ("worktree_action", "delete", "Delete after proof", {"order": 30, "prompt": "Prove the referenced work has no unique reachable value and report a recoverable deletion plan. Do not delete until the human explicitly approves the exact targets."}),
-            ("notification_policy", "stale_worktree_days", "30", {"label": "Potentially stale after days"}),
             ("delivery_policy", "wake_on_tag", "direct", {"label": "Carry tags into idle sessions", "choices": "off, direct, all"}),
         )
         self.connection.executemany("INSERT OR IGNORE INTO option_index(namespace,key,value,metadata_json) VALUES(?,?,?,?)", [(namespace, key, value, json.dumps(metadata, sort_keys=True)) for namespace, key, value, metadata in defaults])
@@ -961,16 +942,6 @@ class RoomStore:
             raise RoomError("only rooms, channels, and chats can be renamed")
         return {"kind": kind, "reference": reference, "label": value["value"]}
 
-    def route_notification(self, repo: Repository, title: str, alert_type: str, actor: str, action_key: str, participants: Sequence[str], paths: Sequence[str]) -> Dict[str, Any]:
-        action = self.option("worktree_action", action_key)
-        selected_actor = target_token(actor)
-        routed = ["@human", selected_actor, *participants]
-        thread = self.open_thread(repo, title, f"{alert_type}: {action['value']}", "@human", routed, paths, "notification-route", metadata={"audience": "human-loop", "origin": "notification"})
-        tags = " ".join(thread["participants"])
-        prompt = str(action["metadata"].get("prompt") or action["value"])
-        self.post_thread(repo, thread["id"], "@human", f"{tags} {prompt} Notification: {thread['title']}.")
-        return thread
-
     def latest_repository(self) -> Optional[Repository]:
         row = self.connection.execute("SELECT repository_root FROM rooms ORDER BY last_seen_at DESC LIMIT 1").fetchone()
         return resolve_repository(row["repository_root"]) if row else None
@@ -1027,10 +998,46 @@ class RoomStore:
     def targets(self, repo: Repository) -> Dict[str, Any]:
         self.register_room(repo)
         agents = [m for m in self.members(repo.room_id) if m["state"] != "offline"]
+        # An agent waiting on an answer looks exactly like one that finished. Both are
+        # quiet. Marking the waiting ones is the difference between reading a roster and
+        # knowing who needs you.
+        waiting = {
+            str(participant)
+            for thread in self.threads(repo)
+            if thread["audience"] == "human-loop"
+            for participant in [thread["metadata"].get("origin_session")]
+            if participant
+        }
+        for agent in agents:
+            if agent["state"] != "online" and str(agent.get("session_id") or "") in waiting:
+                agent["state"] = "blocked"
         worktrees = list_worktree_references(repo)
         for worktree in worktrees:
-            worktree["active_agents"] = sum(Path(m["worktree"]).resolve() == Path(worktree["path"]).resolve() for m in agents)
+            path = Path(worktree["path"])
+            worktree["active_agents"] = sum(Path(m["worktree"]).resolve() == path.resolve() for m in agents)
+            worktree["uncommitted"] = len(changed_worktree_paths(path)) if path.exists() else 0
         return {"room_id": repo.room_id, "agents": agents, "worktrees": worktrees, "human": {"target": "@human"}}
+
+    def merge_readiness(self, repo: Repository, into: Optional[str] = None) -> Dict[str, Any]:
+        """Which branches merge cleanly into the integration branch, and which do not.
+
+        Answering this before a merge is attempted is the difference between discovering a
+        collision now and discovering it while trying to land.
+        """
+        target = (into or "").strip() or (repo.branch if repo.branch in ("main", "master") else "main")
+        branches: List[Dict[str, Any]] = []
+        for worktree in list_worktree_references(repo):
+            branch = str(worktree.get("branch") or "")
+            if not branch or branch == target:
+                continue
+            conflicts = sorted(merge_conflict_paths(repo, target, branch))
+            branches.append({
+                "branch": branch, "target": str(worktree["target"]),
+                "merges_cleanly": not conflicts, "conflicts": conflicts,
+                "uncommitted": len(changed_worktree_paths(Path(worktree["path"]))) if Path(worktree["path"]).exists() else 0,
+            })
+        branches.sort(key=lambda item: (item["merges_cleanly"], item["branch"]))
+        return {"into": target, "clean": sum(1 for b in branches if b["merges_cleanly"]), "conflicted": sum(1 for b in branches if not b["merges_cleanly"]), "branches": branches}
 
     def allowed_targets(self, repo: Repository) -> Set[str]:
         allowed = {"@human"}
@@ -1337,6 +1344,7 @@ def tool_definitions() -> List[Dict[str, Any]]:
         {"name": "room_post", "description": "Post one value-free coordination message. Use thread_id for central routing, or tag active @handles and #worktrees ad hoc.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "sender": {"type": "string"}, "session_id": {"type": "string"}, "thread_id": {"type": "string"}, "recipients": {"type": "array", "items": {"type": "string"}}, "kind": {"type": "string", "enum": list(MESSAGE_KINDS)}, "topic": {"type": "string"}, "status": {"type": "string"}, "message": {"type": "string", "maxLength": 4000}}, "required": ["kind", "topic", "message"]}},
         {"name": "room_session_start", "description": "Open new agent work in a worktree of this project. Starts one local vendor CLI session; that session bills vendor tokens.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "client": {"type": "string", "enum": ["claude", "codex"]}, "worktree": {"type": "string", "description": "Absolute worktree path; defaults to the current one."}, "prompt": {"type": "string", "maxLength": 4000}}, "required": ["client", "prompt"]}},
         {"name": "room_session_stop", "description": "Interrupt a local turn this room started for a session.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "client": {"type": "string", "enum": ["claude", "codex"]}, "session_id": {"type": "string"}}, "required": ["client", "session_id"]}},
+        {"name": "room_ready", "description": "Report which worktree branches merge cleanly into the integration branch and which collide, before a merge is attempted.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "into": {"type": "string", "description": "Integration branch; defaults to main."}}}},
         {"name": "room_search", "description": "Search this room's message history, or indexed local CLI transcripts, beyond the recent window.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "query": {"type": "string"}, "scope": {"type": "string", "enum": ["room", "chats"]}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}}, "required": ["query"]}},
         {"name": "room_handoff", "description": "Post a structured handoff with source, paths, proof, blocker, and next owner.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "sender": {"type": "string"}, "session_id": {"type": "string"}, "topic": {"type": "string"}, "source_sha": {"type": "string"}, "paths": {"type": "array", "items": {"type": "string"}}, "proof": {"type": "string"}, "blocker": {"type": "string"}, "next_owner": {"type": "string"}}, "required": ["topic", "source_sha", "paths", "proof", "next_owner"]}},
     ]
@@ -1369,6 +1377,8 @@ def execute_tool(store: RoomStore, name: str, args: Dict[str, Any]) -> Any:
         return start_session(store.data_dir, repo, str(args["client"]), str(args.get("worktree") or ""), str(args["prompt"]))
     if name == "room_session_stop":
         return stop_delivery(str(args["client"]), str(args["session_id"]))
+    if name == "room_ready":
+        return store.merge_readiness(repo, str(args.get("into") or ""))
     if name == "room_search":
         if str(args.get("scope") or "room") == "chats":
             return {"room_id": repo.room_id, "turns": search_transcripts(store.data_dir, str(args["query"]), int(args.get("limit", 100)))}
@@ -1431,7 +1441,7 @@ class RoomHandler(BaseHTTPRequestHandler):
                 options = store.options()
                 status = store.status(self.app.repo)
                 status["display_name"] = store.display_name("room_name", self.app.repo.room_id, self.app.repo.worktree.name or "Chat Room")
-                self.send_json({"status": status, "messages": store.recent(self.app.repo.room_id, SNAPSHOT_MESSAGE_LIMIT), "targets": targets, "threads": threads, "alerts": coordination_alerts(targets, threads, options), "options": options, "events_url": f"ws://{self.app.hostname}:{self.app.events_port}/events"})
+                self.send_json({"status": status, "messages": store.recent(self.app.repo.room_id, SNAPSHOT_MESSAGE_LIMIT), "targets": targets, "threads": threads, "alerts": coordination_alerts(targets, threads), "options": options, "events_url": f"ws://{self.app.hostname}:{self.app.events_port}/events"})
             return
         if path == "/api/search":
             if not self.authorized(): self.send_json({"error": "invalid local token"}, 403); return
@@ -1487,8 +1497,6 @@ class RoomHandler(BaseHTTPRequestHandler):
                     value = start_chat_delivery(self.app.data_dir, self.app.repo, str(body.get("client") or ""), str(body.get("session_id") or ""), str(body.get("message") or ""), store.members(self.app.repo.room_id), [item for item in attachments if isinstance(item, dict)])
                 elif path == "/api/rename":
                     value = store.rename(self.app.repo, str(body.get("kind") or ""), str(body.get("reference") or ""), str(body.get("label") or ""), str(body.get("client") or ""))
-                elif path == "/api/route-alert":
-                    value = store.route_notification(self.app.repo, str(body.get("title") or "Notification settlement"), str(body.get("alert_type") or "notification"), str(body.get("actor") or "@human"), str(body.get("action") or "investigate"), [str(x) for x in body.get("participants", [])], [str(x) for x in body.get("paths", [])])
                 elif path == "/api/threads":
                     source = "temporary-channel" if str(body.get("lifetime") or "durable") == "temporary" else "team-channel"
                     value = store.open_thread(self.app.repo, str(body.get("title") or ""), str(body.get("reason") or "coordination"), "@human", [str(x) for x in body.get("participants", [])], [str(x) for x in body.get("paths", [])], source, metadata={"audience": str(body.get("audience") or "agents"), "origin": str(body.get("origin") or "human")})
@@ -1716,6 +1724,32 @@ def launcher_report() -> Dict[str, Any]:
     return {"path": launcher, "version": reported or None, "predates_version_flag": result.returncode != 0}
 
 
+def running_room_processes() -> List[Dict[str, Any]]:
+    """Other copies of this program running right now, and how long each has been up.
+
+    A long-lived server or MCP process keeps whatever code it started with. Replacing the
+    files on disk does not touch it, so it can go on writing a shape every other copy has
+    already moved past — the one form of version skew that inspecting an installation
+    cannot reveal, because nothing on disk is wrong.
+    """
+    try:
+        result = subprocess.run(["ps", "-eo", "pid,etime,command"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    running: List[Dict[str, Any]] = []
+    for line in result.stdout.splitlines()[1:]:
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid, elapsed, command = parts
+        if int(pid) == os.getpid() or "ps -eo" in command:
+            continue
+        if "room.py" not in command and f"/{PLUGIN_NAME}" not in command:
+            continue
+        running.append({"pid": int(pid), "uptime": elapsed, "command": concise(command, 110)})
+    return running
+
+
 def diagnose(data_dir: Path, repair: bool = False) -> Dict[str, Any]:
     """Answer 'why is the room broken' without needing to read the source."""
     database = data_dir.expanduser().resolve() / "chat-room.sqlite3"
@@ -1723,9 +1757,13 @@ def diagnose(data_dir: Path, repair: bool = False) -> Dict[str, Any]:
         "version": VERSION, "schema_version": SCHEMA_VERSION,
         "python": sys.version.split()[0], "platform": sys.platform,
         "data_dir": str(data_dir.expanduser().resolve()), "database": str(database),
-        "launcher": launcher_report(), "findings": [],
+        "launcher": launcher_report(), "running": running_room_processes(), "findings": [],
     }
     findings: List[Dict[str, str]] = report["findings"]
+    for process in report["running"]:
+        # Anything older than the installed files may predate them. Report rather than judge:
+        # the operator knows which of these they started, and stopping one is their call.
+        findings.append({"severity": "warning", "detail": f"pid {process['pid']} has been running {process['uptime']} and holds whatever code it started with; if it predates this build it can still write an older shape. Restart it after upgrading."})
     reported = str(report["launcher"]["version"] or "")
     if report["launcher"].get("predates_version_flag"):
         findings.append({"severity": "warning", "detail": f"the installed launcher at {report['launcher']['path']} predates --version, so it is older than {VERSION}; hooks and the browser room are running different code. Reinstall it from this checkout."})
@@ -1870,6 +1908,7 @@ def parser() -> argparse.ArgumentParser:
     stop = sub.add_parser("stop"); stop.add_argument("--cwd"); stop.add_argument("--client", choices=("claude", "codex"), required=True); stop.add_argument("--session", required=True)
     search = sub.add_parser("search"); search.add_argument("--cwd"); search.add_argument("--query", required=True); search.add_argument("--limit", type=int, default=100); search.add_argument("--scope", choices=("room", "chats"), default="room")
     index = sub.add_parser("index"); index.add_argument("--cwd")
+    ready = sub.add_parser("ready"); ready.add_argument("--cwd"); ready.add_argument("--into")
     identify = sub.add_parser("identify"); identify.add_argument("--cwd"); identify.add_argument("--session", required=True); identify.add_argument("--handle", required=True)
     thread_open = sub.add_parser("thread-open"); thread_open.add_argument("--cwd"); thread_open.add_argument("--title", required=True); thread_open.add_argument("--reason", default="coordination"); thread_open.add_argument("--audience", choices=("agents", "human-loop"), default="agents"); thread_open.add_argument("--origin", default="human"); thread_open.add_argument("--lifetime", choices=("durable", "temporary"), default="durable"); thread_open.add_argument("--participant", action="append", default=[]); thread_open.add_argument("--path", action="append", default=[])
     thread_close = sub.add_parser("thread-close"); thread_close.add_argument("--cwd"); thread_close.add_argument("--thread", required=True)
@@ -1910,6 +1949,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             elif args.command == "start": value = start_session(args.data_dir, repo, args.client, args.worktree, args.prompt)
             elif args.command == "stop": value = stop_delivery(args.client, args.session)
             elif args.command == "index": value = run_index(args.data_dir, repo)
+            elif args.command == "ready": value = store.merge_readiness(repo, args.into)
             elif args.command == "search":
                 if args.scope == "chats": value = {"room_id": repo.room_id, "turns": search_transcripts(args.data_dir, args.query, args.limit)}
                 else: value = {"room_id": repo.room_id, "messages": store.search(repo.room_id, args.query, args.limit)}

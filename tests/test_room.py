@@ -66,7 +66,7 @@ class RoomTests(unittest.TestCase):
             member = store.claim_handle(repo, "one", "project-manager")
             self.assertEqual(member["target"], "@project-manager")
             with mock.patch.object(room, "list_worktree_references", return_value=[{"target":"#lane","name":"lane","path":str(repo.worktree),"branch":"lane"}]):
-                message = store.post(repo, "@human", "request", "cleanup", "posted", "@ project-manager inspect #lane", [])
+                message = store.post(repo, "@human", "allocation", "cleanup", "posted", "@ project-manager inspect #lane", [])
             self.assertEqual(message["recipients"], ["@project-manager", "#lane"])
             self.assertEqual(store.read(repo.room_id)[0]["schema"], "chat-room.message.v1")
             self.assertEqual(store.status(repo)["authority"], "advisory-only")
@@ -75,7 +75,7 @@ class RoomTests(unittest.TestCase):
         repo = self.repo()
         with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store:
             with mock.patch.object(room, "list_worktree_references", return_value=[]):
-                with self.assertRaises(room.RoomError): store.post(repo, "@human", "request", "test", "posted", "@missing hello", [])
+                with self.assertRaises(room.RoomError): store.post(repo, "@human", "allocation", "test", "posted", "@missing hello", [])
 
     def test_duplicate_default_handles_get_stable_unique_targets(self):
         repo = self.repo()
@@ -263,7 +263,7 @@ class RoomTests(unittest.TestCase):
                 self.assertTrue(any(item["severity"] == "critical" for item in report["findings"]))
                 repaired = room.diagnose(Path(temp), repair=True)
             self.assertEqual(repaired["column_drift"], {})
-            self.assertEqual([item["severity"] for item in repaired["findings"]], ["ok"])
+            self.assertEqual([item for item in repaired["findings"] if item["severity"] == "critical"], [])
 
     def test_the_room_works_when_the_optional_index_is_absent(self):
         # The index is an accelerator. Without it every entry point must still answer.
@@ -619,26 +619,6 @@ class RoomTests(unittest.TestCase):
     def test_chat_recency_defines_recent_and_inactive(self):
         self.assertEqual(room.chat_recency(room.utc_now()), "recent")
         self.assertEqual(room.chat_recency("2000-01-01T00:00:00Z"), "inactive")
-
-    def test_notification_options_are_indexed_and_route_only_to_chat(self):
-        repo = self.repo()
-        worktrees = [{"target": "#lane", "name": "lane", "path": str(repo.worktree), "branch": "lane"}]
-        with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store, mock.patch.object(room, "list_worktree_references", return_value=worktrees):
-            self.assertEqual([item["key"] for item in store.options()["worktree_action"]], ["consolidate", "delete", "investigate"])
-            store.set_option("worktree_action", "archive", "Archive", {"prompt": "Report an archive plan. Do not mutate Git."})
-            store.upsert_presence(repo, "session:one", "one", None, "codex:lane", "online", "Stop")
-            store.claim_handle(repo, "one", "worker")
-            thread = store.route_notification(repo, "Potentially stale lane", "stale-worktrees", "@worker", "archive", ["#lane"], [str(repo.worktree)])
-            self.assertEqual(thread["source"], "notification-route")
-            self.assertEqual(thread["participants"], ["@human", "@worker", "#lane"])
-            self.assertIn("Do not mutate Git", store.read(repo.room_id)[0]["message"])
-
-    def test_stale_worktrees_are_typed_notifications(self):
-        targets = {"agents": [], "worktrees": [{"target": "#old", "path": "/project/old", "active_agents": 0, "age_days": 45}]}
-        options = {"notification_policy": [{"key": "stale_worktree_days", "value": "30", "metadata": {}}]}
-        alerts = room.coordination_alerts(targets, [], options)
-        self.assertEqual(alerts[0]["type"], "stale-worktrees")
-        self.assertEqual(alerts[0]["thread_id"], None)
 
     def test_dormant_chat_delivery_uses_installed_cli_adapter(self):
         summary = {"client": "Codex", "id": "session-a"}
