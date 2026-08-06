@@ -1330,7 +1330,7 @@ def tool_definitions() -> List[Dict[str, Any]]:
         {"name": "room_post", "description": "Post one value-free coordination message. Use thread_id for central routing, or tag active @handles and #worktrees ad hoc.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "sender": {"type": "string"}, "session_id": {"type": "string"}, "thread_id": {"type": "string"}, "recipients": {"type": "array", "items": {"type": "string"}}, "kind": {"type": "string", "enum": list(MESSAGE_KINDS)}, "topic": {"type": "string"}, "status": {"type": "string"}, "message": {"type": "string", "maxLength": 4000}}, "required": ["kind", "topic", "message"]}},
         {"name": "room_session_start", "description": "Open new agent work in a worktree of this project. Starts one local vendor CLI session; that session bills vendor tokens.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "client": {"type": "string", "enum": ["claude", "codex"]}, "worktree": {"type": "string", "description": "Absolute worktree path; defaults to the current one."}, "prompt": {"type": "string", "maxLength": 4000}}, "required": ["client", "prompt"]}},
         {"name": "room_session_stop", "description": "Interrupt a local turn this room started for a session.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "client": {"type": "string", "enum": ["claude", "codex"]}, "session_id": {"type": "string"}}, "required": ["client", "session_id"]}},
-        {"name": "room_search", "description": "Search this room's message history beyond the recent window.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}}, "required": ["query"]}},
+        {"name": "room_search", "description": "Search this room's message history, or indexed local CLI transcripts, beyond the recent window.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "query": {"type": "string"}, "scope": {"type": "string", "enum": ["room", "chats"]}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}}, "required": ["query"]}},
         {"name": "room_handoff", "description": "Post a structured handoff with source, paths, proof, blocker, and next owner.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "sender": {"type": "string"}, "session_id": {"type": "string"}, "topic": {"type": "string"}, "source_sha": {"type": "string"}, "paths": {"type": "array", "items": {"type": "string"}}, "proof": {"type": "string"}, "blocker": {"type": "string"}, "next_owner": {"type": "string"}}, "required": ["topic", "source_sha", "paths", "proof", "next_owner"]}},
     ]
 
@@ -1363,6 +1363,8 @@ def execute_tool(store: RoomStore, name: str, args: Dict[str, Any]) -> Any:
     if name == "room_session_stop":
         return stop_delivery(str(args["client"]), str(args["session_id"]))
     if name == "room_search":
+        if str(args.get("scope") or "room") == "chats":
+            return {"room_id": repo.room_id, "turns": search_transcripts(store.data_dir, str(args["query"]), int(args.get("limit", 100)))}
         return {"room_id": repo.room_id, "messages": store.search(repo.room_id, str(args["query"]), int(args.get("limit", 100)))}
     if name == "room_handoff":
         paths = [str(x) for x in args.get("paths", [])]
@@ -1756,6 +1758,57 @@ def diagnose(data_dir: Path, repair: bool = False) -> Dict[str, Any]:
     return report
 
 
+def load_chat_index() -> Any:
+    """The transcript index if it is installed, otherwise None.
+
+    Chat Room is dependency-light on purpose: every caller here degrades to reading
+    the vendor files directly, so an absent index costs speed and never function.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import chat_index
+        return chat_index
+    except ImportError:
+        return None
+
+
+def indexable_transcripts(repo: Repository) -> Iterator[Dict[str, Any]]:
+    summaries, files = discover_chat_catalog(repo, force=True)
+    for item in summaries:
+        source = files.get((str(item["client"]).lower(), str(item["id"])))
+        if source is None:
+            continue
+        try:
+            transcript = chat_transcript(repo, str(item["client"]), str(item["id"]))
+        except RoomError:
+            continue
+        yield {"chat": item, "messages": transcript["messages"], "source": str(source)}
+
+
+def run_index(data_dir: Path, repo: Repository) -> Dict[str, Any]:
+    index = load_chat_index()
+    if index is None:
+        raise RoomError("the transcript index needs its optional dependencies: pip install -r requirements-index.txt")
+    try:
+        engine = index.build_engine(data_dir)
+    except index.IndexUnavailable as error:
+        raise RoomError(str(error)) from error
+    result = index.backfill(engine, indexable_transcripts(repo))
+    result.update(index.summary(engine))
+    result["database_url"] = index.database_url(data_dir)
+    return result
+
+
+def search_transcripts(data_dir: Path, query: str, limit: int = 50) -> List[Dict[str, Any]]:
+    index = load_chat_index()
+    if index is None:
+        raise RoomError("searching inside transcripts needs the optional index: pip install -r requirements-index.txt, then run `chat-room index`")
+    try:
+        return index.search_turns(index.build_engine(data_dir), query, limit)
+    except index.IndexUnavailable as error:
+        raise RoomError(str(error)) from error
+
+
 def print_message(item: Dict[str, Any]) -> None:
     targets = " -> " + ",".join(item["recipients"]) if item["recipients"] else ""
     print(f"[{item['id']}] {item['timestamp']} {item['kind'].upper()} {item['sender']}{targets} {item['topic']} [{item['status']}]\n  {item['message']}")
@@ -1808,7 +1861,8 @@ def parser() -> argparse.ArgumentParser:
     post = sub.add_parser("post"); post.add_argument("--cwd"); post.add_argument("--sender", default="@human"); post.add_argument("--kind", choices=MESSAGE_KINDS, default="message"); post.add_argument("--topic", default="general"); post.add_argument("--status", default="posted"); post.add_argument("--recipient", action="append", default=[]); post.add_argument("--message", required=True)
     start = sub.add_parser("start"); start.add_argument("--cwd"); start.add_argument("--client", choices=("claude", "codex"), required=True); start.add_argument("--worktree"); start.add_argument("--prompt", required=True)
     stop = sub.add_parser("stop"); stop.add_argument("--cwd"); stop.add_argument("--client", choices=("claude", "codex"), required=True); stop.add_argument("--session", required=True)
-    search = sub.add_parser("search"); search.add_argument("--cwd"); search.add_argument("--query", required=True); search.add_argument("--limit", type=int, default=100)
+    search = sub.add_parser("search"); search.add_argument("--cwd"); search.add_argument("--query", required=True); search.add_argument("--limit", type=int, default=100); search.add_argument("--scope", choices=("room", "chats"), default="room")
+    index = sub.add_parser("index"); index.add_argument("--cwd")
     identify = sub.add_parser("identify"); identify.add_argument("--cwd"); identify.add_argument("--session", required=True); identify.add_argument("--handle", required=True)
     thread_open = sub.add_parser("thread-open"); thread_open.add_argument("--cwd"); thread_open.add_argument("--title", required=True); thread_open.add_argument("--reason", default="coordination"); thread_open.add_argument("--audience", choices=("agents", "human-loop"), default="agents"); thread_open.add_argument("--origin", default="human"); thread_open.add_argument("--lifetime", choices=("durable", "temporary"), default="durable"); thread_open.add_argument("--participant", action="append", default=[]); thread_open.add_argument("--path", action="append", default=[])
     thread_close = sub.add_parser("thread-close"); thread_close.add_argument("--cwd"); thread_close.add_argument("--thread", required=True)
@@ -1848,7 +1902,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             elif args.command == "identify": value = store.claim_handle(repo, args.session, args.handle)
             elif args.command == "start": value = start_session(args.data_dir, repo, args.client, args.worktree, args.prompt)
             elif args.command == "stop": value = stop_delivery(args.client, args.session)
-            elif args.command == "search": value = {"room_id": repo.room_id, "messages": store.search(repo.room_id, args.query, args.limit)}
+            elif args.command == "index": value = run_index(args.data_dir, repo)
+            elif args.command == "search":
+                if args.scope == "chats": value = {"room_id": repo.room_id, "turns": search_transcripts(args.data_dir, args.query, args.limit)}
+                else: value = {"room_id": repo.room_id, "messages": store.search(repo.room_id, args.query, args.limit)}
             elif args.command == "thread-open": value = store.open_thread(repo, args.title, args.reason, "@human", args.participant, args.path, "temporary-channel" if args.lifetime == "temporary" else "team-channel", metadata={"audience": args.audience, "origin": args.origin})
             elif args.command == "thread-close": value = store.close_thread(repo, args.thread)
             elif args.command == "option-set":
