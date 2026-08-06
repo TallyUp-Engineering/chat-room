@@ -68,6 +68,15 @@ class RoomTests(unittest.TestCase):
             with mock.patch.object(room, "list_worktree_references", return_value=[]):
                 with self.assertRaises(room.RoomError): store.post(repo, "@human", "request", "test", "posted", "@missing hello", [])
 
+    def test_duplicate_default_handles_get_stable_unique_targets(self):
+        repo = self.repo()
+        with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store:
+            store.upsert_presence(repo, "session:one", "one", None, "claude:lane", "online", "SessionStart")
+            store.upsert_presence(repo, "session:two", "two", None, "claude:lane", "online", "SessionStart")
+            targets = [item["target"] for item in store.members(repo.room_id) if item["state"] == "online"]
+            self.assertEqual(len(targets), len(set(targets)))
+            self.assertTrue(any(target.startswith("@claude-lane-") for target in targets))
+
     def test_hook_fails_open_outside_git(self):
         with mock.patch.object(room, "resolve_repository", return_value=None), mock.patch("sys.stdin") as stdin, mock.patch("sys.stdout") as stdout:
             stdin.__iter__.return_value = iter([]); stdin.read.return_value = ""
@@ -87,6 +96,9 @@ class RoomTests(unittest.TestCase):
         self.assertIn("/api/rename", script)
         self.assertIn("new WebSocket", script)
         self.assertIn("clipboardData", script)
+        self.assertIn('value="all"', html)
+        self.assertIn('value="tag"', html)
+        self.assertIn("renderRouting", script)
         self.assertNotIn("setInterval(refreshRoom", script)
 
     def test_terminal_chat_registers_and_releases_cli_presence(self):
@@ -159,6 +171,16 @@ class RoomTests(unittest.TestCase):
             with mock.patch.object(room, "discover_chat_catalog", return_value=([summary], {("codex", "session-a"): path})):
                 history = room.chat_transcript(repo, "Codex", "session-a")
             self.assertEqual([item["body"] for item in history["messages"]], ["hello", "hi"])
+
+    def test_selected_chat_exposes_the_complete_visible_conversation(self):
+        repo = self.repo()
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "session.jsonl"
+            path.write_text("\n".join(json.dumps({"type": "event_msg", "timestamp": f"2026-01-01T00:00:{index % 60:02d}Z", "payload": {"type": "agent_message", "message": f"message {index}"}}) for index in range(1005)))
+            summary = {"client": "Codex", "id": "session-all", "title": "All", "updated_at": "2026-01-01T00:00:01Z", "worktree": "lane", "read_only": True}
+            with mock.patch.object(room, "discover_chat_catalog", return_value=([summary], {("codex", "session-all"): path})):
+                history = room.chat_transcript(repo, "Codex", "session-all")
+            self.assertEqual(len(history["messages"]), 1005)
 
     def test_ui_defaults_to_durable_loopback_name(self):
         args = room.parser().parse_args(["ui"])

@@ -19,6 +19,7 @@ Built in public by [TallyUp Engineering](https://github.com/tallyup-engineering)
 - Machine-local rename overlays for both the project room and individual CLI chats; vendor history files remain untouched.
 - Live/recent/stale/inactive chat status, filtering, and a non-destructive inactive review queue.
 - Durable team channels and temporary coordination channels for design direction, review, handoff, blockers, and one focused goal.
+- One explicit composer route: the selected channel, every active worker, or one tagged worker. Broadcast coordinates through the room; it does not start duplicate CLI turns.
 - Automatic advisory threads when multiple worktrees currently modify the same path.
 - Derived alert cards for shared-worktree actors, file overlaps, potentially stale worktrees, design decisions, blockers, and handoffs, with one routing CTA.
 - Indexed actor/action routing. `investigate`, `consolidate`, and `delete after proof` are editable key/value options; routing opens a tagged chat and never mutates Git.

@@ -12,6 +12,8 @@ let eventsRetry = null;
 let eventsFallback = null;
 let refreshQueued = false;
 let eventCount = 0;
+let alertsExpanded = false;
+let connectionFailures = 0;
 
 function changed(key, value) {
   const signature = JSON.stringify(value);
@@ -33,12 +35,14 @@ async function request(url, options = {}) {
 }
 
 function showError(error) {
+  connectionFailures += 1;
+  if (connectionFailures < 2) return;
   const item = document.querySelector("#error");
-  item.textContent = error.message;
+  item.textContent = error.message === "Failed to fetch" ? "Reconnecting to the local service…" : error.message;
   item.hidden = false;
 }
 
-function clearError() { document.querySelector("#error").hidden = true; }
+function clearError() { connectionFailures = 0; document.querySelector("#error").hidden = true; }
 
 function clearImages() {
   pendingImages.forEach(item => URL.revokeObjectURL(item.preview));
@@ -73,7 +77,8 @@ function fileData(file) {
 
 function targetInput(target) {
   const input = document.querySelector("#message");
-  input.value = `${target} ${input.value}`;
+  const present = new Set((input.value.match(/[@#][a-z0-9-]+/gi) || []).map(value => value.toLowerCase()));
+  if (!present.has(target.toLowerCase())) input.value = `${target} ${input.value}`.trimStart();
   input.focus();
 }
 
@@ -124,9 +129,13 @@ function renderThreads(threads) {
 
 function renderAlerts(alerts) {
   document.querySelector("#alert-count").textContent = alerts.length;
-  if (!changed("alerts", alerts)) return;
-  document.querySelector("#alerts").innerHTML = alerts.map((alert, index) => `<article class="alert-item ${esc(alert.severity)}">${icon(alert.icon)}<div class="alert-copy"><b>${esc(alert.title)}</b><small>${esc(alert.detail)}</small></div><button data-alert="${index}">${alert.thread_id ? 'Open' : 'Route'}</button></article>`).join("") || '<p class="nav-empty">No coordination alerts.</p>';
+  if (!changed("alerts", { alerts, alertsExpanded })) return;
+  const visible = alertsExpanded ? alerts : alerts.slice(0, 3);
+  const more = alerts.length > 3 ? `<button class="more-alerts" data-alert-toggle>${alertsExpanded ? "Show less" : `Show ${alerts.length - 3} more`}</button>` : "";
+  document.querySelector("#alerts").innerHTML = visible.map((alert, index) => `<article class="alert-item ${esc(alert.severity)}">${icon(alert.icon)}<div class="alert-copy"><b>${esc(alert.title)}</b><small>${esc(alert.detail)}</small></div><button data-alert="${index}">${alert.thread_id ? 'Open' : 'Route'}</button></article>`).join("") + more || '<p class="nav-empty">No coordination alerts.</p>';
   document.querySelectorAll("[data-alert]").forEach(node => { node.onclick = () => settleAlert(alerts[Number(node.dataset.alert)]); });
+  const toggle = document.querySelector("[data-alert-toggle]");
+  if (toggle) toggle.onclick = () => { alertsExpanded = !alertsExpanded; renderSignatures.delete("alerts"); renderAlerts(alerts); };
 }
 
 async function settleAlert(alert) {
@@ -156,6 +165,7 @@ function renderSnapshot(data) {
   if (changed("active-agents", online)) document.querySelector("#active-agents").innerHTML = online.length ? online.map(agent => `<button class="active-agent" data-target="${esc(agent.target)}"><span class="dot"></span><b>${esc(agent.target)}</b><small>${esc(String(agent.role || 'agent').split(':')[0])}</small></button>`).join('') : '<p class="nav-empty">No active agents in this room.</p>';
   if (changed("members", { online, idle, offline })) document.querySelector("#members").innerHTML = `<div class="group">⌄ Online — ${online.length}</div>${online.map(buddy).join('')}<div class="group">⌄ Idle — ${idle.length}</div>${idle.map(buddy).join('')}<div class="group">⌄ Offline — ${offline.length}</div>${offline.map(buddy).join('')}`;
   attachTargetHandlers();
+  renderRouting();
   connectEvents(data.events_url);
   if (currentView.kind === "room" || currentView.kind === "thread") renderRoomView();
 }
@@ -173,11 +183,13 @@ function renderRoomView() {
   document.querySelector("#close-thread").textContent = activeThread?.lifetime === "temporary" ? "Resolve" : "Archive";
   document.querySelector("#rename-view").hidden = false;
   document.querySelector("#compose-label").textContent = activeThread ? `thread ${activeThread.id} · routes to every participant` : "message as @human · ad hoc tagging is built in";
+  document.querySelector("#room-routing").hidden = false;
   document.querySelector("#message").disabled = false;
   document.querySelector("#send-message").disabled = false;
   document.querySelector("#attach-image").disabled = true;
   document.querySelector("#message").placeholder = activeThread ? "Message this coordination room…" : "Message the combined room. Tag an active @actor or #worktree.";
   document.querySelector("#combined-room").classList.toggle("active", !activeThread);
+  renderRouting();
   renderThreads(roomData.threads || []);
   renderRoomMessages(roomData);
 }
@@ -224,9 +236,11 @@ function openInactivePanel() {
   document.querySelector("#close-thread").hidden = true;
   document.querySelector("#rename-view").hidden = true;
   document.querySelector("#combined-room").classList.remove("active");
+  document.querySelector("#room-routing").hidden = true;
   document.querySelector("#message").disabled = true;
   document.querySelector("#send-message").disabled = true;
   document.querySelector("#attach-image").disabled = true;
+  document.querySelector("#room-routing").hidden = true;
   const messages = resetMessages("Live means attached now. Recent means under 7 days. Stale means 7–29 days. Inactive means 30+ days without a live session. Review does not delete vendor-owned history.");
   for (const chat of inactive) {
     const card = document.createElement("div");
@@ -302,6 +316,7 @@ document.querySelector("#chat-filter").oninput = () => renderCatalog(catalogData
 document.querySelector("#chat-status-filter").onchange = () => renderCatalog(catalogData);
 document.querySelector("#list-inactive").onclick = openInactivePanel;
 document.querySelector("#attach-image").onclick = () => document.querySelector("#image-input").click();
+document.querySelector("#send-scope").onchange = renderRouting;
 document.querySelector("#image-input").onchange = event => { addImages(event.target.files || []); event.target.value = ""; };
 document.querySelector("#message").addEventListener("paste", event => {
   if (currentView.kind !== "history") return;
@@ -368,11 +383,27 @@ document.querySelector("#composer").addEventListener("submit", async event => {
       await request("/api/chat-send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message, attachments, client: currentView.client, session_id: currentView.id }) });
       input.value = ""; clearImages(); await refreshCurrentHistory();
     } else {
-      await request("/api/messages", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message, kind: "message", topic: "general", thread_id: currentView.kind === "thread" ? currentView.id : undefined }) });
+      const scope = document.querySelector("#send-scope").value;
+      const recipients = scope === "all" ? (roomData?.targets?.agents || []).map(agent => agent.target) : scope === "tag" ? [document.querySelector("#send-target").value].filter(Boolean) : [];
+      await request("/api/messages", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message, recipients, kind: "message", topic: scope === "channel" ? "general" : scope, thread_id: scope === "channel" && currentView.kind === "thread" ? currentView.id : undefined }) });
       input.value = ""; await refreshRoom();
     }
   } catch (error) { showError(error); }
 });
+
+function renderRouting() {
+  if (!roomData) return;
+  const scope = document.querySelector("#send-scope");
+  const target = document.querySelector("#send-target");
+  const thread = currentView.kind === "thread" ? roomData.threads.find(item => item.id === currentView.id) : null;
+  scope.options[0].textContent = thread ? `Channel · ${thread.title}` : "Channel · All activity";
+  const agents = roomData.targets?.agents || [];
+  const selected = target.value;
+  if (changed("routing-agents", agents.map(agent => [agent.target, agent.worktree_target]))) target.innerHTML = agents.map(agent => `<option value="${esc(agent.target)}">${esc(agent.target)} · ${esc(agent.worktree_target)}</option>`).join("");
+  if (agents.some(agent => agent.target === selected)) target.value = selected;
+  if ((scope.value === "all" || scope.value === "tag") && !agents.length) scope.value = "channel";
+  target.hidden = scope.value !== "tag";
+}
 
 function queueRefresh(includeCatalog = false) {
   eventCount += 1;

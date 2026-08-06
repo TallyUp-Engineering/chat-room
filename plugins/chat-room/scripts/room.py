@@ -35,7 +35,7 @@ from urllib.request import Request, urlopen
 
 
 PLUGIN_NAME = "chat-room"
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 SCHEMA_VERSION = 4
 ACTIVE_WINDOW_SECONDS = 30 * 60
 WAKE_ENDPOINT_ENV = "CHAT_ROOM_WAKE_ENDPOINT"
@@ -324,7 +324,7 @@ def chat_transcript(repo: Repository, client: str, session_id: str) -> Dict[str,
             body = text_content(message.get("content"))
             if body:
                 messages.append({"role": role, "body": body, "timestamp": str(item.get("timestamp") or "")})
-    return {"chat": summary, "messages": messages[-1000:]}
+    return {"chat": summary, "messages": messages}
 
 
 def slug(value: str, fallback: str = "target", limit: int = 64) -> str:
@@ -828,6 +828,15 @@ class RoomStore:
             value["worktree_target"] = worktree_target(Path(value["worktree"]))
             value["wakeable_idle"] = bool(value["state"] in ("online", "idle") and endpoint_live and value.get("last_event") == "Stop" and str(value.get("role", "")).startswith("codex:"))
             result.append(value)
+        seen: Set[str] = set()
+        for value in result:
+            if value["state"] == "offline":
+                continue
+            target = str(value["target"])
+            if target in seen:
+                suffix = hashlib.sha256(str(value["participant_id"]).encode()).hexdigest()[:6]
+                value["target"] = f"{target}-{suffix}"
+            seen.add(str(value["target"]))
         return result
 
     def claim_handle(self, repo: Repository, session_ref: str, requested: str) -> Dict[str, Any]:
@@ -880,7 +889,10 @@ class RoomStore:
         targets = list(dict.fromkeys(target_token(value) for value in participants if str(value).strip()))
         unknown = [value for value in targets if value not in self.allowed_targets(repo)]
         if unknown:
-            raise RoomError("inactive or unknown thread participant(s): " + ", ".join(unknown))
+            if source == "preemptive-conflict":
+                targets = [value for value in targets if value not in unknown]
+            else:
+                raise RoomError("inactive or unknown thread participant(s): " + ", ".join(unknown))
         clean_paths = list(dict.fromkeys(concise(path, 300) for path in paths if str(path).strip()))
         now = utc_now()
         identifier = thread_id or "thread-" + hashlib.sha256(os.urandom(32)).hexdigest()[:12]
@@ -1131,7 +1143,10 @@ class RoomHandler(BaseHTTPRequestHandler):
         return host in {"127.0.0.1", "localhost", "::1", self.app.hostname}
     def send_json(self, value: Any, status: int = 200) -> None:
         payload = json.dumps(value, separators=(",", ":")).encode()
-        self.send_response(status); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(payload))); self.send_header("Cache-Control", "no-store"); self.end_headers(); self.wfile.write(payload)
+        try:
+            self.send_response(status); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(payload))); self.send_header("Cache-Control", "no-store"); self.end_headers(); self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
     def do_GET(self) -> None:
         if not self.valid_host(): self.send_error(HTTPStatus.MISDIRECTED_REQUEST); return
         parsed = urlparse(self.path); path = parsed.path

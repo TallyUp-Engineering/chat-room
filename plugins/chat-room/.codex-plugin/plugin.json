@@ -1,6 +1,6 @@
 {
   "name": "chat-room",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Live local coding-agent chats, durable and temporary channels, conflict detection, and indexed routing actions.",
   "author": { "name": "TallyUp Engineering", "url": "https://github.com/tallyup-engineering" },
   "license": "Apache-2.0",

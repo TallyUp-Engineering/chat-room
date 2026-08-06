@@ -255,7 +255,7 @@ h2 {
   line-height: 1.45;
 }
 
-.chat { min-width: 0; min-height: 0; display: grid; grid-template-rows: 47px minmax(0, 1fr) auto auto; background: #fff; }
+.chat { position: relative; min-width: 0; min-height: 0; display: grid; grid-template-rows: 47px minmax(0, 1fr) auto auto; background: #fff; }
 .chat > header {
   padding: 8px 13px;
   display: flex;
@@ -303,6 +303,8 @@ h2 {
 }
 #composer { position: sticky; bottom: 0; z-index: 2; box-shadow: 0 -7px 14px #20345d12; }
 .tools span { color: #61708c; font: 9px Tahoma, sans-serif; }
+.tools #room-routing { display: inline-flex; gap: 4px; }
+.tools select { max-width: 145px; padding: 2px 4px; border: 1px solid #91a4c8; border-radius: 3px; background: #fff; color: #26385e; font-size: 8px; }
 .tools button { margin: 0 4px; padding: 1px 5px; border: 1px solid #a7b6d1; border-radius: 3px; background: #fff; color: #38517f; cursor: pointer; }
 .tools button:disabled { cursor: not-allowed; opacity: .45; }
 .attachments { padding: 6px 8px; display: flex; gap: 6px; overflow-x: auto; border-bottom: 1px solid #c4cde0; background: #e8effc; }
@@ -315,7 +317,8 @@ h2 {
 .compose textarea:focus { box-shadow: 0 0 0 2px #b9cefa; }
 .compose button { border: 1px solid #123d9a; border-radius: 4px; background: linear-gradient(#3e75db, #1544aa); color: #fff; font-weight: 700; cursor: pointer; }
 .compose textarea:disabled, .compose button:disabled { cursor: not-allowed; opacity: .55; }
-.error { margin: 0; padding: 7px 10px; border-top: 1px solid #e6979e; background: #ffe1e4; color: #871d29; }
+.error { position: absolute; right: 10px; bottom: 116px; z-index: 4; max-width: 260px; margin: 0; padding: 6px 9px; border: 1px solid #e6979e; border-radius: 3px; box-shadow: 0 3px 10px #23345d2c; background: #fff3f4; color: #871d29; font-size: 9px; }
+.more-alerts { width: calc(100% - 8px); margin: 4px; padding: 5px; border: 1px dashed #8ca3cc; background: #f5f8ff; color: #36517f; font-size: 8px; cursor: pointer; }
 
 .self { padding: 9px; display: flex; align-items: center; gap: 9px; border: 1px solid #a8badd; border-radius: 4px; background: #ffffffb8; }
 .self > span { width: 38px; height: 38px; display: grid; place-items: center; border: 1px solid #123d99; border-radius: 4px; background: linear-gradient(#4c7bdd, #1744a8); color: #fff; font: 700 17px Georgia; }
