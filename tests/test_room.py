@@ -19,6 +19,9 @@ assert SPEC.loader
 sys.modules[SPEC.name] = room
 SPEC.loader.exec_module(room)
 
+# The transcript index is optional; its tests skip where it is not installed.
+CHAT_INDEX = room.load_chat_index()
+
 
 class RoomTests(unittest.TestCase):
     def repo(self):
@@ -200,6 +203,115 @@ class RoomTests(unittest.TestCase):
             self.assertEqual(room.merge_conflict_paths(repo, "one", "three"), set())
             self.assertEqual(room.merge_conflict_paths(repo, "one", "one"), set())
             self.assertEqual(room.merge_conflict_paths(repo, "one", "no-such-branch"), set())
+
+    def test_a_copy_behind_the_database_reads_but_refuses_to_write(self):
+        repo = self.repo()
+        with tempfile.TemporaryDirectory() as temp:
+            with room.RoomStore(Path(temp)) as store:
+                store.upsert_presence(repo, "session:one", "one", None, "claude:lane", "online", "SessionStart")
+                with mock.patch.object(room, "list_worktree_references", return_value=[]):
+                    store.post(repo, "@human", "message", "general", "posted", "written by the newer copy", [])
+            # Stand in for a newer chat-room having owned this database first.
+            ahead = sqlite3.connect(str(Path(temp) / "chat-room.sqlite3"))
+            ahead.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('schema_version',?)", (str(room.SCHEMA_VERSION + 1),))
+            ahead.commit(); ahead.close()
+            with room.RoomStore(Path(temp)) as store:
+                self.assertTrue(store.behind)
+                # Reading is always safe.
+                self.assertEqual([item["message"] for item in store.recent(repo.room_id)], ["written by the newer copy"])
+                self.assertEqual(len(store.members(repo.room_id)), 1)
+                # Writing would put back a shape the database has moved past.
+                for write in (
+                    lambda: store.upsert_presence(repo, "session:two", "two", None, "claude:lane", "online", "SessionStart"),
+                    lambda: store.post(repo, "@human", "message", "general", "posted", "nope", []),
+                    lambda: store.set_option("delivery_policy", "wake_on_tag", "off"),
+                ):
+                    with self.assertRaises(room.RoomError):
+                        write()
+                # Heartbeats go quiet rather than raising, so context injection still works.
+                store.advance_cursor(repo.room_id, "session:one", 1)
+                store.register_room(repo)
+
+    def test_the_schema_record_never_moves_backwards(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with room.RoomStore(Path(temp)) as store:
+                self.assertEqual(store.installed_schema(), room.SCHEMA_VERSION)
+            # An older copy of this script opening the same database must not rewind the record,
+            # which is how a stale binary silently re-enables migrations that already ran.
+            with mock.patch.object(room, "SCHEMA_VERSION", room.SCHEMA_VERSION - 1):
+                with room.RoomStore(Path(temp)) as older:
+                    self.assertTrue(older.behind)
+            with room.RoomStore(Path(temp)) as store:
+                self.assertEqual(store.installed_schema(), room.SCHEMA_VERSION)
+                self.assertFalse(store.behind)
+
+    def test_doctor_names_column_drift_and_repairs_it(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with room.RoomStore(Path(temp)):
+                pass
+            widened = sqlite3.connect(str(Path(temp) / "chat-room.sqlite3"))
+            widened.execute("ALTER TABLE presence ADD COLUMN claimed INTEGER NOT NULL DEFAULT 0")
+            widened.commit(); widened.close()
+
+            with mock.patch.object(room, "find_cli_executable", return_value=None):
+                report = room.diagnose(Path(temp))
+                self.assertEqual(report["column_drift"]["presence"]["unexpected"], ["claimed"])
+                self.assertTrue(any(item["severity"] == "critical" for item in report["findings"]))
+                repaired = room.diagnose(Path(temp), repair=True)
+            self.assertEqual(repaired["column_drift"], {})
+            self.assertEqual([item["severity"] for item in repaired["findings"]], ["ok"])
+
+    def test_the_room_works_when_the_optional_index_is_absent(self):
+        # The index is an accelerator. Without it every entry point must still answer.
+        with mock.patch.dict(sys.modules, {"chat_index": None}):
+            with self.assertRaises(room.RoomError) as absent:
+                room.search_transcripts(Path("/tmp"), "anything")
+            self.assertIn("requirements-index.txt", str(absent.exception))
+
+    @unittest.skipUnless(CHAT_INDEX, "optional transcript index not installed")
+    def test_transcript_index_backfills_incrementally_and_searches_inside_turns(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "session.jsonl"
+            source.write_text("placeholder\n")
+            transcript = {
+                "chat": {"client": "Claude", "id": "session-one", "title": "Rebuild the projection", "cwd": temp, "worktree": "lane", "updated_at": "2026-08-06T19:00:00Z"},
+                "messages": [
+                    {"role": "user", "body": "please run the merge-tree check", "timestamp": "2026-08-06T19:00:00Z"},
+                    {"role": "assistant", "body": "the branches merge cleanly", "timestamp": "2026-08-06T19:00:05Z"},
+                ],
+                "source": str(source),
+            }
+            engine = CHAT_INDEX.build_engine(Path(temp))
+            self.assertEqual(CHAT_INDEX.backfill(engine, [transcript]), {"indexed": 1, "skipped": 0})
+            # An unchanged source is never re-read.
+            self.assertEqual(CHAT_INDEX.backfill(engine, [transcript]), {"indexed": 0, "skipped": 1})
+
+            counts = CHAT_INDEX.summary(engine)
+            self.assertEqual((counts["actors"], counts["chats"], counts["turns"]), (1, 1, 2))
+
+            found = CHAT_INDEX.search_turns(engine, "merge-tree")
+            self.assertEqual([item["body"] for item in found], ["please run the merge-tree check"])
+            self.assertEqual(found[0]["client"], "claude")
+            self.assertEqual(found[0]["title"], "Rebuild the projection")
+            # A wildcard is matched literally rather than widening the search.
+            self.assertEqual(CHAT_INDEX.search_turns(engine, "%"), [])
+            self.assertEqual(CHAT_INDEX.search_turns(engine, "   "), [])
+
+            # A rewritten transcript must not leave stale turns behind.
+            source.write_text("placeholder rewritten\n")
+            transcript["messages"] = [{"role": "user", "body": "different question", "timestamp": "2026-08-06T20:00:00Z"}]
+            self.assertEqual(CHAT_INDEX.backfill(engine, [transcript]), {"indexed": 1, "skipped": 0})
+            self.assertEqual(CHAT_INDEX.summary(engine)["turns"], 1)
+            self.assertEqual(CHAT_INDEX.search_turns(engine, "merge-tree"), [])
+
+    @unittest.skipUnless(CHAT_INDEX, "optional transcript index not installed")
+    def test_index_reports_an_unreachable_store_without_a_traceback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with mock.patch.dict(os.environ, {CHAT_INDEX.DATABASE_URL_ENV: "postgresql+psycopg://someone:secret@127.0.0.1:59999/nope"}):
+                with self.assertRaises(CHAT_INDEX.IndexUnavailable) as unreachable:
+                    CHAT_INDEX.build_engine(Path(temp))
+            # The message locates the store without repeating the credentials in it.
+            self.assertNotIn("secret", str(unreachable.exception))
 
     def test_shared_tables_are_never_written_positionally(self):
         # Several versions of this script share one database on a machine. A positional

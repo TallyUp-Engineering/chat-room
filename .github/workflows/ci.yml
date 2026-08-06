@@ -21,6 +21,10 @@ jobs:
         with:
           node-version: "22"
           cache: npm
+      # The transcript index is optional, so both paths have to hold: the suite must pass
+      # with nothing installed, and again with the extras present.
+      - run: python3 -m unittest discover -s tests -p 'test_room.py' -v
+      - run: pip install -r requirements-index.txt
       - run: python3 -m unittest discover -s tests -p 'test_room.py' -v
       - run: python3 -m json.tool plugins/chat-room/.codex-plugin/plugin.json >/dev/null
       - run: python3 -m json.tool .agents/plugins/marketplace.json >/dev/null

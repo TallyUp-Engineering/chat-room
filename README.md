@@ -47,6 +47,24 @@ Under every value the room refuses to deliver its own `@chat-room` chatter, to e
 into the session that sent it, to overlap a turn already running, or to deliver twice inside 60
 seconds. Those four guards are what stop two tagged agents from billing each other in a loop.
 
+### Searching inside conversations
+
+Room search covers coordination messages. To search inside the transcripts themselves, install
+the optional index once:
+
+```sh
+pip install -r requirements-index.txt
+chat-room index                       # backfill; re-runs only read what changed
+chat-room search --scope chats --query "merge-tree"
+```
+
+`room_search` takes the same `scope`. The index stores actors, chats, turns, and reachable
+servers; SQLite is the default and needs nothing further. Point `CHAT_ROOM_DATABASE_URL` at a
+`postgresql+psycopg://` URL to use Postgres instead.
+
+Chat Room runs without any of this. Every entry point degrades to reading vendor files
+directly, so an absent index costs speed and never function.
+
 ### Everything from v0.5 still holds
 
 - One room per Git common directory, shared automatically by linked worktrees.
