@@ -35,7 +35,7 @@ from urllib.request import Request, urlopen
 
 
 PLUGIN_NAME = "chat-room"
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 SCHEMA_VERSION = 4
 ACTIVE_WINDOW_SECONDS = 30 * 60
 WAKE_ENDPOINT_ENV = "CHAT_ROOM_WAKE_ENDPOINT"
@@ -598,16 +598,16 @@ def chat_delivery_state(summary: Dict[str, Any], members: Sequence[Dict[str, Any
                 except OSError: pass
             CHAT_DELIVERIES.pop(key, None)
     if running:
-        return {"ready": False, "mode": "running", "label": "Agent turn running", "detail": "The transcript will refresh as the CLI writes it."}
+        return {"ready": False, "mode": "running", "label": "Agent is responding", "detail": "This conversation refreshes as the active agent responds."}
     if member:
         endpoint = str(member.get("wake_endpoint") or "")
         if client == "codex" and member.get("last_event") == "Stop" and endpoint and socket_ready(endpoint):
-            return {"ready": True, "mode": "live", "label": "Send to live Codex", "detail": "Uses the selected CLI session's local app-server connection."}
-        return {"ready": False, "mode": "active-unattached", "label": "Open in CLI", "detail": "This session is active but has no safe browser delivery adapter. Codex sessions launched with chat-room codex are writable here while idle."}
+            return {"ready": True, "mode": "live", "label": "Ready to message", "detail": "Sends through this conversation's existing local connection."}
+        return {"ready": False, "mode": "active-unattached", "label": "Active elsewhere", "detail": "This conversation already has an active writer, so it stays view-only here to prevent competing turns."}
     executable = find_cli_executable("codex" if client == "codex" else "claude" if client == "claude" else "")
     if executable:
-        return {"ready": True, "mode": "resume", "label": f"Continue in {summary['client']}", "detail": "Starts one local CLI turn in this stored session; normal CLI configuration and sandbox rules still apply."}
-    return {"ready": False, "mode": "unavailable", "label": "History only", "detail": f"The {summary.get('client') or 'vendor'} CLI is not installed on this machine."}
+        return {"ready": True, "mode": "resume", "label": "Ready to continue", "detail": f"Starts one local {summary['client']} turn in this stored conversation with its normal configuration and safety rules."}
+    return {"ready": False, "mode": "unavailable", "label": "View only", "detail": f"No local {summary.get('client') or 'vendor'} conversation adapter is available on this machine."}
 
 
 def materialize_chat_images(data_dir: Path, attachments: Sequence[Dict[str, Any]]) -> List[Path]:

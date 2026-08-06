@@ -277,6 +277,21 @@ h2 {
 .chat > header small { margin-top: 3px; color: var(--muted); font-size: 9px; }
 .connected { color: #34714e; font-size: 9px; }
 .messages { min-height: 0; padding: 13px; overflow: auto; background: linear-gradient(#fff, #fbfcff); }
+.activation-panel { width: min(650px, calc(100% - 34px)); margin: clamp(28px, 9vh, 80px) auto 24px; }
+.activation-state { display: inline-flex; align-items: center; gap: 5px; color: #5d6f8d; font-size: 8px; font-weight: 700; letter-spacing: .12em; }
+.activation-state i { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 2px #d8f1e1; }
+.activation-panel h1 { margin: 10px 0 5px; color: #1e3158; font-size: 20px; letter-spacing: -.02em; }
+.activation-panel > p { margin: 0 0 18px; color: #697790; font-size: 10px; }
+.activation-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.activation-grid button { min-height: 72px; padding: 12px; display: block; border: 1px solid #b4c3df; border-radius: 5px; background: linear-gradient(#fff, #f3f7fd); color: #263c68; text-align: left; cursor: pointer; box-shadow: 0 1px 2px #2f497817; }
+.activation-grid button:hover { border-color: #6f8fc8; background: #fff; box-shadow: 0 0 0 2px #dce7fa; }
+.activation-grid button:disabled { cursor: not-allowed; opacity: .45; box-shadow: none; }
+.activation-grid b, .activation-grid small { display: block; }
+.activation-grid b { font-size: 11px; }
+.activation-grid small { margin-top: 5px; color: #71809a; font-size: 8px; line-height: 1.35; }
+.activation-foot { margin-top: 12px; display: flex; align-items: center; gap: 7px; color: #77839a; font-size: 8px; }
+.activation-foot span { margin-right: auto; }
+.activation-foot button { padding: 4px 7px; border: 1px solid #b1bfd7; border-radius: 3px; background: #fff; color: #4a6087; font-size: 8px; cursor: pointer; }
 .notice {
   margin: 0 14px 14px;
   padding: 8px 10px;
@@ -356,4 +371,7 @@ footer { grid-column: 1 / -1; padding: 6px 10px; display: flex; justify-content:
   .rooms { display: none; }
   footer { grid-column: 1; }
   .msg { grid-template-columns: 70px 1fr; }
+  .activation-grid { grid-template-columns: 1fr; }
+  .activation-foot { align-items: flex-start; flex-wrap: wrap; }
+  .activation-foot span { width: 100%; }
 }

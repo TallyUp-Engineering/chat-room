@@ -103,6 +103,10 @@ class RoomTests(unittest.TestCase):
         self.assertIn('value="all"', html)
         self.assertIn('value="tag"', html)
         self.assertIn("renderRouting", script)
+        self.assertIn("What do you want to activate?", script)
+        self.assertIn("View room log", script)
+        self.assertIn('id="composer" hidden', html)
+        self.assertNotIn("Open in CLI", script)
         self.assertIn('#room-routing[hidden]', (assets / "room.css").read_text())
         self.assertNotIn("setInterval(refreshRoom", script)
 
@@ -244,10 +248,12 @@ class RoomTests(unittest.TestCase):
             state = room.chat_delivery_state(summary, [])
         self.assertTrue(state["ready"])
         self.assertEqual(state["mode"], "resume")
+        self.assertEqual(state["label"], "Ready to continue")
         active = [{"session_id": "session-a", "state": "online", "last_event": "PostToolUse", "wake_endpoint": None}]
         state = room.chat_delivery_state(summary, active)
         self.assertFalse(state["ready"])
         self.assertEqual(state["mode"], "active-unattached")
+        self.assertEqual(state["label"], "Active elsewhere")
 
     def test_cli_discovery_survives_a_minimal_service_path(self):
         with tempfile.TemporaryDirectory() as temp, mock.patch.object(room.shutil, "which", return_value=None), mock.patch.object(room.Path, "home", return_value=Path(temp)):

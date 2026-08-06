@@ -12,6 +12,7 @@ let eventsFallback = null;
 let refreshQueued = false;
 let eventCount = 0;
 let connectionFailures = 0;
+let consoleComposerActive = false;
 
 function changed(key, value) {
   const signature = JSON.stringify(value);
@@ -96,12 +97,12 @@ function resetMessages(notice) {
 
 function renderRoomMessages(data) {
   const thread = currentView.kind === "thread" ? data.threads.find(item => item.id === currentView.id) : null;
-  const items = thread ? data.messages.filter(item => item.metadata?.thread_id === thread.id) : data.messages;
+  const items = thread ? data.messages.filter(item => item.metadata?.thread_id === thread.id) : [];
   if (!changed("room-messages", { view: currentView, thread: thread?.updated_at, items: items.map(item => [item.id, item.status, item.message]) })) return;
   const pane = document.querySelector("#messages");
   const stayAtBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 80;
   const previousTop = pane.scrollTop;
-  const messages = resetMessages(thread ? `${thread.audience === 'human-loop' ? 'Human in the Loop' : 'Agent-only chatter'} · ${thread.reason} · from ${thread.origin}` : "Command Console combines room activity as read. Send to all active agents, one worker, or a human question thread.");
+  const messages = resetMessages(`${thread.audience === 'human-loop' ? 'Human in the Loop' : 'Agent-only chatter'} · ${thread.reason} · from ${thread.origin}`);
   for (const message of items) {
     const row = document.createElement("div");
     row.className = "msg";
@@ -109,6 +110,47 @@ function renderRoomMessages(data) {
     messages.append(row);
   }
   messages.scrollTop = stayAtBottom ? messages.scrollHeight : previousTop;
+}
+
+function renderRoomLog(data) {
+  const items = data.messages;
+  if (!changed("room-log", items.map(item => [item.id, item.status, item.message]))) return;
+  const messages = resetMessages("Room log · opened deliberately · all activity is shown as read");
+  for (const message of items) {
+    const row = document.createElement("div");
+    row.className = "msg";
+    row.innerHTML = `<div class="meta"><b>${esc(message.sender)}</b>${time(message.timestamp)}</div><div><span class="kind">${esc(message.kind)}</span>${rich(message.message)}</div>`;
+    messages.append(row);
+  }
+  messages.scrollTop = messages.scrollHeight;
+}
+
+function activateConsole(scope) {
+  consoleComposerActive = true;
+  const composer = document.querySelector("#composer");
+  composer.hidden = false;
+  document.querySelector("#send-scope").value = scope;
+  renderRouting();
+  document.querySelector("#message").focus();
+}
+
+function renderConsoleLanding(data) {
+  const agents = data.targets.agents || [];
+  const online = agents.filter(agent => agent.state === "online");
+  const idle = agents.filter(agent => agent.state === "idle");
+  const questions = data.threads.filter(thread => thread.audience === "human-loop").length;
+  const chatter = data.threads.filter(thread => thread.audience !== "human-loop").length;
+  const shared = (data.alerts || []).filter(alert => alert.type === "shared-worktree").length;
+  const signature = { online: online.map(agent => agent.target), idle: idle.map(agent => agent.target), questions, chatter, shared };
+  if (!changed("console-landing", signature)) return;
+  const messages = document.querySelector("#messages");
+  messages.innerHTML = `<section class="activation-panel"><span class="activation-state"><i></i> READY</span><h1>What do you want to activate?</h1><p>${online.length} active worker${online.length === 1 ? '' : 's'}${idle.length ? ` · ${idle.length} idle` : ''}. Nothing is sent until you choose a route.</p><div class="activation-grid"><button type="button" data-console-action="all"${online.length ? '' : ' disabled'}><b>Message everyone</b><small>Send one room message to all active workers.</small></button><button type="button" data-console-action="tag"${online.length ? '' : ' disabled'}><b>Tag a worker</b><small>Choose one active Codex or Claude session.</small></button><button type="button" data-console-action="human"><b>Ask a human question</b><small>Open a durable question with its reason and source.</small></button><button type="button" data-console-action="chatter"><b>Start agent chatter</b><small>Activate a focused agent-only coordination thread.</small></button></div><div class="activation-foot"><span>${questions} human question${questions === 1 ? '' : 's'} · ${chatter} chatter thread${chatter === 1 ? '' : 's'}${shared ? ` · ${shared} shared-worktree signal${shared === 1 ? '' : 's'}` : ''}</span><button type="button" data-console-action="chats">Choose a chat</button><button type="button" data-console-action="log">View room log</button></div></section>`;
+  messages.querySelector('[data-console-action="all"]').onclick = () => activateConsole("all");
+  messages.querySelector('[data-console-action="tag"]').onclick = () => activateConsole("tag");
+  messages.querySelector('[data-console-action="human"]').onclick = () => document.querySelector("#new-human-thread").click();
+  messages.querySelector('[data-console-action="chatter"]').onclick = () => document.querySelector("#new-thread").click();
+  messages.querySelector('[data-console-action="chats"]').onclick = () => { document.querySelector("#chats-section").open = true; document.querySelector("#chat-filter").focus(); };
+  messages.querySelector('[data-console-action="log"]').onclick = openRoomLog;
 }
 
 function renderThreads(threads) {
@@ -170,36 +212,49 @@ function renderSnapshot(data) {
   roomData = data;
   document.querySelector("#room-title").textContent = data.status.display_name || data.status.room_id;
   document.querySelector("#authority").textContent = `${data.status.project_identity} • advisory-only`;
-  document.querySelector("#counts").textContent = `${data.messages.length} messages • ${data.status.members_online} active`;
-  document.querySelector("#combined-count").textContent = data.messages.length;
   renderSuggestions(data.alerts || []);
   renderThreads(data.threads || []);
   renderHumanThreads(data.threads || []);
   const online = data.targets.agents.filter(agent => agent.state === "online");
   const idle = data.targets.agents.filter(agent => agent.state === "idle");
   const offline = data.targets.agents.filter(agent => agent.state === "offline");
+  document.querySelector("#combined-count").textContent = online.length;
+  document.querySelector("#counts").textContent = `${online.length} active • ${idle.length} idle • ${data.threads.length} open threads`;
   if (changed("active-agents", online)) document.querySelector("#active-agents").innerHTML = online.length ? online.map(agent => `<button class="active-agent" data-target="${esc(agent.target)}"><span class="dot"></span><b>${esc(agent.target)}</b><small>${esc(String(agent.role || 'agent').split(':')[0])}</small></button>`).join('') : '<p class="nav-empty">No active agents in this room.</p>';
   if (changed("members", { online, idle, offline })) document.querySelector("#members").innerHTML = `<div class="group">⌄ Online — ${online.length}</div>${online.map(buddy).join('')}<div class="group">⌄ Idle — ${idle.length}</div>${idle.map(buddy).join('')}<div class="group">⌄ Offline — ${offline.length}</div>${offline.map(buddy).join('')}`;
   attachTargetHandlers();
   renderRouting();
   connectEvents(data.events_url);
-  if (currentView.kind === "room" || currentView.kind === "thread") renderRoomView();
+  if (currentView.kind === "room" || currentView.kind === "thread" || currentView.kind === "room-log") renderRoomView();
 }
 
 function renderRoomView() {
   if (!roomData) return;
+  if (currentView.kind === "room-log") {
+    document.querySelector("#chat-pane").classList.remove("history-mode");
+    document.querySelector("#view-title").textContent = "Room Log";
+    document.querySelector("#identity").textContent = `${roomData.status.project_identity} · opened deliberately`;
+    document.querySelector("#view-status").textContent = "● read-only log";
+    document.querySelector("#close-thread").hidden = true;
+    document.querySelector("#rename-view").hidden = true;
+    document.querySelector("#composer").hidden = true;
+    document.querySelector("#combined-room").classList.remove("active");
+    renderRoomLog(roomData);
+    return;
+  }
   const thread = currentView.kind === "thread" ? roomData.threads.find(item => item.id === currentView.id) : null;
   if (currentView.kind === "thread" && !thread) currentView = { kind: "room", id: "room" };
   const activeThread = currentView.kind === "thread" ? roomData.threads.find(item => item.id === currentView.id) : null;
   document.querySelector("#chat-pane").classList.remove("history-mode");
   const agentOnly = activeThread?.audience === "agents";
   document.querySelector("#view-title").textContent = activeThread?.title || "Command Console";
-  document.querySelector("#identity").textContent = activeThread ? `${activeThread.audience === 'human-loop' ? 'human in the loop' : 'agent-only chatter'} · ${activeThread.reason} · ${activeThread.id}` : `${roomData.status.project_identity} · all activity`;
-  document.querySelector("#view-status").textContent = "● connected locally";
+  document.querySelector("#identity").textContent = activeThread ? `${activeThread.audience === 'human-loop' ? 'human in the loop' : 'agent-only chatter'} · ${activeThread.reason} · ${activeThread.id}` : `${roomData.status.project_identity} · choose an action`;
+  document.querySelector("#view-status").textContent = activeThread ? "● connected locally" : "● ready";
   document.querySelector("#close-thread").hidden = !activeThread;
   document.querySelector("#close-thread").textContent = activeThread?.lifetime === "temporary" ? "Resolve" : "Archive";
   document.querySelector("#rename-view").hidden = false;
   document.querySelector("#compose-label").textContent = agentOnly ? "agent-only chatter · visible to @human" : activeThread ? `human question · response returns to ${activeThread.origin}` : "message as @human · route to all or tag one worker";
+  document.querySelector("#composer").hidden = activeThread ? agentOnly : !consoleComposerActive;
   document.querySelector("#room-routing").hidden = Boolean(activeThread);
   document.querySelector("#message").disabled = agentOnly;
   document.querySelector("#send-message").disabled = agentOnly;
@@ -209,18 +264,29 @@ function renderRoomView() {
   renderRouting();
   renderThreads(roomData.threads || []);
   renderHumanThreads(roomData.threads || []);
-  renderRoomMessages(roomData);
+  if (activeThread) renderRoomMessages(roomData); else renderConsoleLanding(roomData);
 }
 
 function openRoom() {
   clearImages();
+  consoleComposerActive = false;
   currentView = { kind: "room", id: "room" };
+  renderSignatures.delete("console-landing");
   renderRoomView();
 }
 
 function openThread(threadId) {
   clearImages();
+  consoleComposerActive = false;
   currentView = { kind: "thread", id: threadId };
+  renderRoomView();
+}
+
+function openRoomLog() {
+  clearImages();
+  consoleComposerActive = false;
+  currentView = { kind: "room-log", id: "room-log" };
+  renderSignatures.delete("room-log");
   renderRoomView();
 }
 
@@ -244,6 +310,7 @@ function renderCatalog(data) {
 
 function openInactivePanel() {
   clearImages();
+  consoleComposerActive = false;
   const liveSessions = new Set((roomData?.targets?.agents || []).map(agent => agent.session_id).filter(Boolean));
   const inactive = catalogData.chats.filter(chat => !liveSessions.has(chat.id) && chat.recency === "inactive");
   currentView = { kind: "inactive", id: "inactive" };
@@ -254,6 +321,7 @@ function openInactivePanel() {
   document.querySelector("#close-thread").hidden = true;
   document.querySelector("#rename-view").hidden = true;
   document.querySelector("#combined-room").classList.remove("active");
+  document.querySelector("#composer").hidden = true;
   document.querySelector("#room-routing").hidden = true;
   document.querySelector("#message").disabled = true;
   document.querySelector("#send-message").disabled = true;
@@ -273,6 +341,7 @@ async function openHistory(client, sessionId) {
   try {
     const data = await request(`/api/chat?client=${encodeURIComponent(client)}&id=${encodeURIComponent(sessionId)}`);
     currentView = { kind: "history", id: sessionId, client };
+    consoleComposerActive = false;
     clearImages();
     renderSignatures.delete("history");
     renderHistory(data);
@@ -288,10 +357,11 @@ function renderHistory(data) {
   document.querySelector("#chat-pane").classList.add("history-mode");
   document.querySelector("#view-title").textContent = data.chat.title;
   document.querySelector("#identity").textContent = `${data.chat.client} · ${data.chat.worktree} · ${data.delivery.label}`;
-  document.querySelector("#view-status").textContent = data.delivery.mode === "running" ? "● turn running" : data.delivery.ready ? "● synced locally" : "● history mirror";
+  document.querySelector("#view-status").textContent = data.delivery.mode === "running" ? "● responding" : data.delivery.mode === "active-unattached" ? "● active elsewhere" : data.delivery.ready ? "● ready" : "● view only";
   document.querySelector("#close-thread").hidden = true;
   document.querySelector("#rename-view").hidden = false;
   document.querySelector("#combined-room").classList.remove("active");
+  document.querySelector("#composer").hidden = false;
   const input = document.querySelector("#message");
   const send = document.querySelector("#send-message");
   input.disabled = !data.delivery.ready;
@@ -303,7 +373,7 @@ function renderHistory(data) {
   if (!changed("history", signature)) return;
   const previousTop = pane.scrollTop;
   const messages = pane;
-  messages.innerHTML = `<p class="history-notice">${esc(`Synced from the local CLI transcript. Tool calls, hidden instructions, and reasoning stay hidden. ${data.delivery.detail}`)}</p>`;
+  messages.innerHTML = `<p class="history-notice">${esc(`Synced from local conversation history. Tool calls, hidden instructions, and reasoning stay hidden. ${data.delivery.detail}`)}</p>`;
   for (const message of data.messages) {
     const row = document.createElement("div");
     row.className = "msg";
@@ -352,9 +422,9 @@ if (localStorage.getItem("chat-room-sidebar") === "collapsed") {
   document.querySelector("#layout").classList.add("sidebar-collapsed");
   document.querySelector("#toggle-sidebar").textContent = "Show sidebar";
 }
-document.querySelector("#new-thread").onclick = () => { document.querySelector("#thread-form").hidden = false; document.querySelector("#thread-title").focus(); };
+document.querySelector("#new-thread").onclick = () => { consoleComposerActive = false; document.querySelector("#composer").hidden = true; document.querySelector("#thread-form").hidden = false; document.querySelector("#thread-title").focus(); };
 document.querySelector("#cancel-thread").onclick = () => { document.querySelector("#thread-form").hidden = true; };
-document.querySelector("#new-human-thread").onclick = () => { document.querySelector("#human-thread-form").hidden = false; document.querySelector("#human-thread-title").focus(); };
+document.querySelector("#new-human-thread").onclick = () => { consoleComposerActive = false; document.querySelector("#composer").hidden = true; document.querySelector("#human-thread-form").hidden = false; document.querySelector("#human-thread-title").focus(); };
 document.querySelector("#cancel-human-thread").onclick = () => { document.querySelector("#human-thread-form").hidden = true; };
 document.querySelector("#human-thread-form").addEventListener("submit", async event => {
   event.preventDefault();
@@ -406,7 +476,7 @@ document.querySelector("#composer").addEventListener("submit", async event => {
       const scope = document.querySelector("#send-scope").value;
       const recipients = scope === "all" ? (roomData?.targets?.agents || []).map(agent => agent.target) : scope === "tag" ? [document.querySelector("#send-target").value].filter(Boolean) : [];
       await request("/api/messages", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message, recipients, kind: "message", topic: scope === "channel" ? "general" : scope, thread_id: scope === "channel" && currentView.kind === "thread" ? currentView.id : undefined }) });
-      input.value = ""; await refreshRoom();
+      input.value = ""; consoleComposerActive = false; renderSignatures.delete("console-landing"); await refreshRoom();
     }
   } catch (error) { showError(error); }
 });

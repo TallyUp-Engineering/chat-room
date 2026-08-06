@@ -14,6 +14,7 @@ Built in public by [TallyUp Engineering](https://github.com/tallyup-engineering)
 - Active `@agent` handles and independent `#worktree` targets.
 - Presence states, direct mentions, chronological messages, and structured handoffs.
 - A primary **Command Console** for all project activity, a durable **Human in the Loop** question queue, agent-only **Chatter**, and real local Codex and Claude conversations under **Chats**.
+- The Command Console starts as a quiet activation screen. It does not render the room log or expose a composer until the human chooses a route; the full log remains one deliberate click away.
 - Live CLI transcripts with signature-stable rendering. Dormant sessions can be continued through their installed local CLI; an idle Codex session launched with `chat-room codex` accepts turns through its existing local app-server connection.
 - Paste, drop, or attach images when continuing a supported Codex or Claude conversation. Temporary image files are private and removed after delivery.
 - Machine-local rename overlays for both the project room and individual CLI chats; vendor history files remain untouched.
