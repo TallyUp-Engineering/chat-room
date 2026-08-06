@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import stat
@@ -175,6 +176,57 @@ class RoomTests(unittest.TestCase):
             self.assertIn("#lane-one #lane-two", prompt["message"])
             self.assertNotIn("@human", prompt["message"])
             self.assertIn("these branches conflict on", prompt["message"])
+
+    def repo_with_branches(self, branches):
+        """A real repository where each named branch changes one file from a common base."""
+        temp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, temp, True)
+        root = Path(temp) / "project"
+        root.mkdir()
+
+        def git(*args):
+            subprocess.run(["git", "-C", str(root), *args], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        git("init", "-q", "-b", "base")
+        git("config", "user.email", "test@example.test")
+        git("config", "user.name", "Test")
+        (root / "tools.txt").write_text("base\n")
+        (root / "other.txt").write_text("base\n")
+        git("add", "."); git("commit", "-qm", "base")
+        for name, (path, content) in branches.items():
+            git("checkout", "-q", "base")
+            git("checkout", "-qb", name)
+            (root / path).write_text(content)
+            git("commit", "-qam", name)
+        git("checkout", "-q", "base")
+        return root
+
+    def test_readiness_reports_branches_that_only_collide_with_each_other(self):
+        # Two branches can each merge cleanly into the target and still collide the moment
+        # either one lands — two additions at the same place read as independent until they
+        # are not. Reporting only "clean against the target" hides that until it is too late.
+        root = self.repo_with_branches({
+            "add-left": ("tools.txt", "base\nleft addition\n"),
+            "add-right": ("tools.txt", "base\nright addition\n"),
+            "elsewhere": ("other.txt", "base\nunrelated\n"),
+        })
+        repo = room.resolve_repository(str(root))
+        worktrees = [{"target": "#" + name, "name": name, "path": str(root), "branch": name}
+                     for name in ("add-left", "add-right", "elsewhere")]
+        with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store, \
+                mock.patch.object(room, "list_worktree_references", return_value=worktrees):
+            report = store.merge_readiness(repo, "base")
+
+        found = {item["branch"]: item for item in report["branches"]}
+        # Each merges cleanly into the target on its own.
+        self.assertTrue(all(item["merges_cleanly"] for item in report["branches"]))
+        # The two editing the same line collide with each other, and name the file.
+        self.assertEqual([c["branch"] for c in found["add-left"]["collides_with"]], ["add-right"])
+        self.assertEqual([c["branch"] for c in found["add-right"]["collides_with"]], ["add-left"])
+        self.assertEqual(found["add-left"]["collides_with"][0]["paths"], ["tools.txt"])
+        # A branch touching an unrelated file is not dragged in.
+        self.assertEqual(found["elsewhere"]["collides_with"], [])
+        self.assertEqual((report["clean"], report["latent"], report["conflicted"]), (1, 2, 0))
 
     def test_only_real_merge_conflicts_are_reported(self):
         with tempfile.TemporaryDirectory() as temp:

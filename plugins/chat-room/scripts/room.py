@@ -436,6 +436,14 @@ def changed_worktree_paths(path: Path) -> Set[str]:
     return {entry[3:] for entry in result.stdout.split("\0") if len(entry) > 3 and entry[2] == " "}
 
 
+def branch_changed_paths(repo: Repository, target: str, branch: str) -> Set[str]:
+    """Paths a branch changes relative to where it left the target."""
+    if not branch or not target:
+        return set()
+    output = run_git(repo.worktree, "diff", "--name-only", f"{target}...{branch}", check=False)
+    return {line for line in output.splitlines() if line.strip()}
+
+
 def merge_conflict_paths(repo: Repository, left: str, right: str) -> Set[str]:
     """Paths Git reports as conflicting when the two branches are merged."""
     if not left or not right or left == right:
@@ -1034,18 +1042,48 @@ class RoomStore:
         """
         target = (into or "").strip() or (repo.branch if repo.branch in ("main", "master") else "main")
         branches: List[Dict[str, Any]] = []
+        touched: Dict[str, Set[str]] = {}
         for worktree in list_worktree_references(repo):
             branch = str(worktree.get("branch") or "")
-            if not branch or branch == target:
+            if not branch or branch == target or branch in touched:
                 continue
             conflicts = sorted(merge_conflict_paths(repo, target, branch))
+            touched[branch] = branch_changed_paths(repo, target, branch)
             branches.append({
                 "branch": branch, "target": str(worktree["target"]),
                 "merges_cleanly": not conflicts, "conflicts": conflicts,
+                "collides_with": [],
                 "uncommitted": len(changed_worktree_paths(Path(worktree["path"]))) if Path(worktree["path"]).exists() else 0,
             })
-        branches.sort(key=lambda item: (item["merges_cleanly"], item["branch"]))
-        return {"into": target, "clean": sum(1 for b in branches if b["merges_cleanly"]), "conflicted": sum(1 for b in branches if not b["merges_cleanly"]), "branches": branches}
+
+        # Merging cleanly into the target is not the same as being safe to land. Two branches
+        # can each merge cleanly today and still collide with each other the moment either one
+        # lands — two additions at the same place read as independent until they are not. Only
+        # pairs that touch a file in common are worth asking Git about.
+        by_branch = {item["branch"]: item for item in branches}
+        probes = 0
+        for index, left in enumerate(branches):
+            for right in branches[index + 1:]:
+                if probes >= MAX_CONFLICT_PROBES:
+                    break
+                if not touched[left["branch"]] & touched[right["branch"]]:
+                    continue
+                probes += 1
+                shared = sorted(merge_conflict_paths(repo, left["branch"], right["branch"]))
+                if not shared:
+                    continue
+                by_branch[left["branch"]]["collides_with"].append({"branch": right["branch"], "paths": shared})
+                by_branch[right["branch"]]["collides_with"].append({"branch": left["branch"], "paths": shared})
+
+        branches.sort(key=lambda item: (item["merges_cleanly"], not item["collides_with"], item["branch"]))
+        return {
+            "into": target,
+            "clean": sum(1 for b in branches if b["merges_cleanly"] and not b["collides_with"]),
+            "conflicted": sum(1 for b in branches if not b["merges_cleanly"]),
+            "latent": sum(1 for b in branches if b["merges_cleanly"] and b["collides_with"]),
+            "pairs_probed": probes,
+            "branches": branches,
+        }
 
     def allowed_targets(self, repo: Repository) -> Set[str]:
         allowed = {"@human"}
