@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import os
 import sqlite3
 import sys
@@ -68,6 +69,24 @@ class RoomTests(unittest.TestCase):
     def test_hook_fails_open_outside_git(self):
         with mock.patch.object(room, "resolve_repository", return_value=None), mock.patch("sys.stdin") as stdin, mock.patch("sys.stdout") as stdout:
             stdin.__iter__.return_value = iter([]); stdin.read.return_value = ""
+
+    def test_ui_pins_combined_room_and_groups_interface_sessions(self):
+        assets = MODULE.parents[1] / "assets"
+        html = (assets / "index.html").read_text()
+        script = (assets / "room.js").read_text()
+        self.assertIn("Combined Chat Room", html)
+        self.assertIn('id="interfaces"', html)
+        self.assertIn("interfaceGroups(data.targets.agents)", script)
+        self.assertIn("['Codex',[]],['CLI',[]]", script)
+
+    def test_terminal_chat_registers_and_releases_cli_presence(self):
+        repo = self.repo()
+        with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store:
+            with mock.patch("sys.stdin", io.StringIO("")), mock.patch("sys.stdout", io.StringIO()):
+                self.assertEqual(room.run_chat(store, repo, "@human"), 0)
+            member = next(item for item in store.members(repo.room_id) if item["role"].startswith("cli:"))
+            self.assertEqual(member["state"], "offline")
+            self.assertEqual(member["last_event"], "ChatEnd")
 
 
 if __name__ == "__main__": unittest.main()

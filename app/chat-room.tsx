@@ -24,19 +24,25 @@ const buddyGroups = [
   { label: "Offline — 1", state: "offline", people: [["@docs-agent", "last seen 14m"]] },
 ];
 
+const interfaceGroups = [
+  { label: "Codex", sessions: [["@project-manager", "#release-train · active", "online"], ["@ui-agent", "#room-interface · active", "online"], ["@api-agent", "#auth-fix · idle", "idle"]] },
+  { label: "CLI", sessions: [["@human", "local terminal · active", "online"]] },
+  { label: "Claude", sessions: [["@docs-agent", "#documentation · offline", "offline"]] },
+];
+
 function highlight(value: string) {
   const pieces = value.split(/(@[a-z0-9-]+|#[a-z0-9-]+)/gi);
   return pieces.map((part, index) => /^[@#]/.test(part) ? <span className="tag" key={`${part}-${index}`}>{part}</span> : part);
 }
 
 export function ChatRoom() {
-  const [room, setRoom] = useState("#lobby");
+  const [room, setRoom] = useState("Combined Chat Room");
   const [messages, setMessages] = useState(initialMessages);
   const [draft, setDraft] = useState("");
   const [away, setAway] = useState("Available");
   const [selectedBuddy, setSelectedBuddy] = useState("@project-manager");
   const nextId = useRef(10);
-  const unread = useMemo(() => room === "#lobby" ? 0 : 2, [room]);
+  const unread = useMemo(() => messages.length, [messages.length]);
 
   function send(event: FormEvent) {
     event.preventDefault();
@@ -68,24 +74,24 @@ export function ChatRoom() {
           <div className="menu-bar"><span>Room</span><span>People</span><span>Actions</span><span>Help</span></div>
           <div className="room-layout">
             <aside className="rail">
-              <div className="panel-label">Rooms</div>
-              {["#lobby", "#release-train", "#room-interface", "#auth-fix"].map((name) => <button className={`room-item ${room === name ? "active" : ""}`} key={name} onClick={() => setRoom(name)}><span>▸</span>{name}{name === "#auth-fix" && unread > 0 ? <b>{unread}</b> : null}</button>)}
-              <div className="panel-label">Direct messages</div>
-              <button className="room-item" onClick={() => setRoom("@project-manager")}>● @project-manager</button>
-              <button className="room-item" onClick={() => setRoom("@api-agent")}>◐ @api-agent</button>
+              <div className="panel-label">Conversations</div>
+              <button className={`room-item combined ${room === "Combined Chat Room" ? "active" : ""}`} onClick={() => setRoom("Combined Chat Room")}><span className="combined-icon">◎</span><span><strong>Combined Chat Room</strong><small>Every active interface</small></span><b>{unread}</b></button>
+              <div className="rail-hint">Select a chat below to add its <strong>@tag</strong> to the combined room.</div>
+              {interfaceGroups.map((group) => <div className="interface-group" key={group.label}><div className="interface-title"><span>⌄ {group.label}</span><b>{group.sessions.length}</b></div>{group.sessions.map(([name, detail, state]) => <button className={`room-item session ${room === name ? "selected" : ""}`} key={`${group.label}-${name}`} onClick={() => { setRoom(name); setDraft(`${name} `); }}><span className={`presence-dot ${state}`}/><span><strong>{name}</strong><small>{detail}</small></span></button>)}</div>)}
+              <div className="adapter-note">Any MCP or hook adapter appears here automatically.</div>
               <div className="rail-note"><strong>Room ≠ authority.</strong><br/>Messages coordinate intent. Repository and provider state decide what is true.</div>
             </aside>
 
             <section className="chat-pane">
-              <div className="chat-heading"><div><strong>{room}</strong><small>{room.startsWith("#") ? "One project, every linked worktree" : "Direct session thread"}</small></div><div className="room-status"><span className="status-dot"/> connected locally</div></div>
+              <div className="chat-heading"><div><strong>{room}</strong><small>{room === "Combined Chat Room" ? "All interfaces, one project, every linked worktree" : "Tagged session inside the combined room"}</small></div><div className="room-status"><span className="status-dot"/> connected locally</div></div>
               <div className="transcript" aria-live="polite">
                 <div className="system-message">Room state is stored locally in SQLite. Secret-shaped messages are rejected before write.</div>
                 {messages.map((message) => <div className="message-row" key={message.id}><div className="message-meta"><strong>{message.sender}</strong>{message.time}</div><div className="message-body"><span className="kind">{message.kind}</span>{highlight(message.body)}</div></div>)}
               </div>
               <div className="typing">{selectedBuddy === "@api-agent" ? "@api-agent is idle — your tag will wake the session" : `${selectedBuddy} is available`}</div>
               <form className="composer" onSubmit={send}>
-                <div className="composer-tools"><button type="button"><b>B</b></button><button type="button"><i>I</i></button><button type="button">@</button><button type="button">#</button><span>message as @human</span></div>
-                <div className="compose-row"><textarea aria-label="Message" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={`Message ${room}. Try “@api-agent status?”`} /><button className="send-button" type="submit">Send</button></div>
+                <div className="composer-tools"><button type="button"><b>B</b></button><button type="button"><i>I</i></button><button type="button">@</button><button type="button">#</button><span>message as @human · tagging is built in</span></div>
+                <div className="compose-row"><textarea aria-label="Message" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Message the combined room. Try “@api-agent status?”" /><button className="send-button" type="submit">Send</button></div>
               </form>
             </section>
 
@@ -105,7 +111,7 @@ export function ChatRoom() {
         <article className="feature"><b>Safe by construction</b><p>Loopback-only UI, local SQLite, credential-pattern rejection, and advisory semantics.</p></article>
       </section>
 
-      <footer className="site-footer"><span>Apache-2.0 • Built in public by TallyUp Engineering</span><span>Original interface. Not affiliated with or endorsed by AOL.</span></footer>
+      <footer className="site-footer"><span>Apache-2.0 • Built in public by TallyUp Engineering</span><span>Original retro desktop messenger interface.</span></footer>
     </main>
   );
 }

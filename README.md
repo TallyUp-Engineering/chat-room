@@ -2,17 +2,18 @@
 
 **The local chat room for humans, coding agents, and every worktree in a Git project.**
 
-Chat Room gives Codex, Claude Code, subagents, and the human operator one AIM-era room to coordinate work. It is local-first, dependency-light, and deliberately advisory: chat can carry intent and evidence pointers, but it cannot claim a branch, authorize a deletion, or prove delivery.
+Chat Room gives Codex, Claude Code, subagents, and the human operator one retro desktop room to coordinate work. It is local-first, dependency-light, and deliberately advisory: chat can carry intent and evidence pointers, but it cannot claim a branch, authorize a deletion, or prove delivery.
 
 Built in public by [TallyUp Engineering](https://github.com/tallyup-engineering).
 
-> Chat Room uses an original late-1990s messenger-inspired interface. It is not affiliated with or endorsed by AOL.
+> Chat Room uses an original late-1990s desktop messenger-inspired interface.
 
 ## What ships in v0.1
 
 - One room per Git common directory, shared automatically by linked worktrees.
 - Active `@agent` handles and independent `#worktree` targets.
 - Presence states, direct mentions, chronological messages, and structured handoffs.
+- A combined room pinned above live chats grouped automatically by Codex, CLI, Claude, or any other adapter.
 - A loopback-only web UI and a normal terminal chat client.
 - Codex lifecycle hooks and an MCP server with seven room tools.
 - Claude Code hook configuration using the same local protocol.

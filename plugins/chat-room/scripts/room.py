@@ -609,29 +609,36 @@ def print_message(item: Dict[str, Any]) -> None:
 
 
 def run_chat(store: RoomStore, repo: Repository, sender: str) -> int:
-    print(f"Chat Room {repo.room_id} — {repo.project_identity}\nTag active @handles and #worktrees. /help for commands.")
-    recent = store.recent(repo.room_id, 30)
-    for item in recent: print_message(item)
-    after = recent[-1]["id"] if recent else 0
-    while True:
-        try:
-            if sys.stdin.isatty():
-                print(f"{sender}> ", end="", flush=True)
-                while not select.select([sys.stdin], [], [], .5)[0]:
-                    incoming = store.read(repo.room_id, after, 100)
-                    if incoming:
-                        print(); [print_message(x) for x in incoming]; after = incoming[-1]["id"]; print(f"{sender}> ", end="", flush=True)
-                line = sys.stdin.readline()
-            else: line = sys.stdin.readline()
-            if not line: return 0
-            line = line.strip()
-        except KeyboardInterrupt: print(); return 0
-        if line in ("/quit", "/exit"): return 0
-        if line == "/help": print("/targets /members /recent /quit — or type a message"); continue
-        if line == "/targets": print(json.dumps(store.targets(repo), indent=2)); continue
-        if line == "/members": print(json.dumps(store.members(repo.room_id), indent=2)); continue
-        if line == "/recent": [print_message(x) for x in store.recent(repo.room_id, 30)]; continue
-        if line: print_message(store.post(repo, sender, "message", "general", "posted", line, []))
+    participant = f"cli:{os.getpid()}:{repo.worktree}"
+    role = f"cli:{repo.worktree.name}"
+    store.upsert_presence(repo, participant, None, None, role, "online", "ChatStart")
+    try:
+        print(f"Chat Room {repo.room_id} — {repo.project_identity}\nTag active @handles and #worktrees. /help for commands.")
+        recent = store.recent(repo.room_id, 30)
+        for item in recent: print_message(item)
+        after = recent[-1]["id"] if recent else 0
+        while True:
+            try:
+                if sys.stdin.isatty():
+                    print(f"{sender}> ", end="", flush=True)
+                    while not select.select([sys.stdin], [], [], .5)[0]:
+                        incoming = store.read(repo.room_id, after, 100)
+                        if incoming:
+                            print(); [print_message(x) for x in incoming]; after = incoming[-1]["id"]; print(f"{sender}> ", end="", flush=True)
+                    line = sys.stdin.readline()
+                else: line = sys.stdin.readline()
+                if not line: return 0
+                line = line.strip()
+            except KeyboardInterrupt: print(); return 0
+            store.upsert_presence(repo, participant, None, None, role, "online", "ChatInput")
+            if line in ("/quit", "/exit"): return 0
+            if line == "/help": print("/targets /members /recent /quit — or type a message"); continue
+            if line == "/targets": print(json.dumps(store.targets(repo), indent=2)); continue
+            if line == "/members": print(json.dumps(store.members(repo.room_id), indent=2)); continue
+            if line == "/recent": [print_message(x) for x in store.recent(repo.room_id, 30)]; continue
+            if line: print_message(store.post(repo, sender, "message", "general", "posted", line, []))
+    finally:
+        store.upsert_presence(repo, participant, None, None, role, "offline", "ChatEnd")
 
 
 def parser() -> argparse.ArgumentParser:
