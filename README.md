@@ -53,7 +53,7 @@ Room search covers coordination messages. To search inside the transcripts thems
 the optional index once:
 
 ```sh
-pip install -r requirements-index.txt
+pipx install 'chat-room[index]'      # or: pipx inject chat-room sqlalchemy alembic
 chat-room index                       # backfill; re-runs only read what changed
 chat-room search --scope chats --query "merge-tree"
 ```
@@ -89,16 +89,40 @@ directly, so an absent index costs speed and never function.
 - SQLite state under `~/.chat-room`, mode `0600`, with credential-shape rejection.
 - No hosted account, telemetry, or project-specific dependency. The optional macOS user service is loopback-only and reversible.
 
-## Install for Codex
+## Install
+
+Chat Room is a Python program. `pipx` gives it its own environment and puts one command on
+your path:
+
+```sh
+pipx install chat-room
+chat-room doctor
+```
+
+`pip install chat-room` works too if you would rather manage the environment yourself. To
+search inside conversations, add the optional index:
+
+```sh
+pipx install 'chat-room[index]'
+```
+
+Nothing else is required. The command works from any Git worktree, and `chat-room --version`
+reports the build and schema it speaks.
+
+### Codex plugin
+
+Codex users can install the same thing as a plugin, which also registers the MCP server and
+lifecycle hooks:
 
 ```sh
 codex plugin marketplace add TallyUp-Engineering/chat-room
 codex plugin add chat-room@chat-room
 ```
 
-Then open a Git worktree and ask Codex: “show the Chat Room status.”
+Then open a Git worktree and ask Codex: “show the Chat Room status.” The plugin is an
+optional adapter — every client below works without Codex present.
 
-The Codex plugin install does not add a shell command. To use the browser and terminal clients from any repository, clone Chat Room once and install its user-level command:
+### From a checkout
 
 ```sh
 git clone https://github.com/TallyUp-Engineering/chat-room.git ~/chat-room

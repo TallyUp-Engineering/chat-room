@@ -270,7 +270,7 @@ class RoomTests(unittest.TestCase):
         with mock.patch.dict(sys.modules, {"chat_index": None}):
             with self.assertRaises(room.RoomError) as absent:
                 room.search_transcripts(Path("/tmp"), "anything")
-            self.assertIn("requirements-index.txt", str(absent.exception))
+            self.assertIn("chat-room[index]", str(absent.exception))
 
     @unittest.skipUnless(CHAT_INDEX, "optional transcript index not installed")
     def test_transcript_index_backfills_incrementally_and_searches_inside_turns(self):
