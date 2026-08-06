@@ -1,4 +1,8 @@
 import importlib.util
+import contextlib
+import http.client
+import threading
+from http import HTTPStatus
 import io
 import json
 import os
@@ -312,6 +316,123 @@ class RoomTests(unittest.TestCase):
                     CHAT_INDEX.build_engine(Path(temp))
             # The message locates the store without repeating the credentials in it.
             self.assertNotIn("secret", str(unreachable.exception))
+
+    @contextlib.contextmanager
+    def http_server(self):
+        """A real loopback server over a real Git worktree.
+
+        The handler is where the token gate, the host check, and every body limit
+        actually live, so they are asserted against requests rather than by reading
+        the source.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "project"
+            root.mkdir()
+
+            def git(*args):
+                subprocess.run(["git", "-C", str(root), *args], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            git("init", "-q", "-b", "main")
+            git("config", "user.email", "test@example.test")
+            git("config", "user.name", "Test")
+            (root / "readme.txt").write_text("hello\n")
+            git("add", "."); git("commit", "-qm", "base")
+
+            repo = room.resolve_repository(str(root))
+            token = "a" * 32
+            server = room.RoomHTTPServer(
+                ("127.0.0.1", 0), repo, Path(temp) / "data", MODULE.parents[1] / "assets",
+                token, "localhost", 0, room.EventHub(),
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                yield f"127.0.0.1:{server.server_address[1]}", token, root
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+    @staticmethod
+    def request(authority, method="GET", path="/", token=None, body=None, host=None):
+        connection = http.client.HTTPConnection(authority, timeout=10)
+        headers = {"Host": host or authority}
+        if token:
+            headers["X-Chat-Room-Token"] = token
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+        try:
+            connection.request(method, path, body=json.dumps(body) if body is not None else None, headers=headers)
+            response = connection.getresponse()
+            return response.status, response.read().decode("utf-8", "replace")
+        finally:
+            connection.close()
+
+    def test_http_serves_the_room_and_gates_every_api_on_the_local_token(self):
+        with self.http_server() as (authority, token, _root):
+            status, page = self.request(authority)
+            self.assertEqual(status, 200)
+            self.assertIn("<title>Chat Room</title>", page)
+
+            # Static assets the page needs are readable; anything else is not served.
+            for asset in ("/room.css", "/room.js", "/icons.svg"):
+                self.assertEqual(self.request(authority, path=asset)[0], 200, asset)
+            self.assertEqual(self.request(authority, path="/../room.py")[0], 404)
+            self.assertEqual(self.request(authority, path="/api/nothing")[0], 404)
+
+            # Every API read requires the local token, including the snapshot.
+            for path in ("/api/snapshot", "/api/search?q=x", "/api/chats"):
+                self.assertEqual(self.request(authority, path=path)[0], 403, path)
+                self.assertEqual(self.request(authority, path=path, token=token)[0], 200, path)
+
+            # And so does every write.
+            self.assertEqual(self.request(authority, "POST", "/api/messages", body={"message": "hi"})[0], 403)
+
+    def test_http_refuses_a_foreign_host_header(self):
+        with self.http_server() as (authority, token, _root):
+            status, _ = self.request(authority, path="/api/snapshot", token=token, host="chat-room.example.test")
+            self.assertEqual(status, HTTPStatus.MISDIRECTED_REQUEST)
+
+    def test_http_write_paths_report_their_refusals(self):
+        with self.http_server() as (authority, token, root):
+            status, body = self.request(authority, "POST", "/api/messages", token=token, body={"message": "coordination note", "kind": "message", "topic": "general"})
+            self.assertEqual(status, 201, body)
+
+            # Oversized bodies are refused before they are read.
+            status, _ = self.request(authority, "POST", "/api/messages", token=token, body={"message": "x" * 20000})
+            self.assertEqual(status, 413)
+
+            # A credential-shaped message never reaches storage.
+            status, body = self.request(authority, "POST", "/api/messages", token=token, body={"message": "password=hunter2hunter2"})
+            self.assertEqual(status, 400)
+            self.assertIn("value-free", body)
+
+            # Starting a session outside this project is refused by path, not by luck.
+            status, body = self.request(authority, "POST", "/api/session-start", token=token, body={"client": "claude", "worktree": "/", "prompt": "no"})
+            self.assertEqual(status, 400)
+            self.assertIn("does not belong", body)
+
+            # An unsupported client never reaches a subprocess.
+            status, _ = self.request(authority, "POST", "/api/session-start", token=token, body={"client": "emacs", "worktree": str(root), "prompt": "no"})
+            self.assertEqual(status, 400)
+
+            # Stopping a turn nobody started is an error, not a crash.
+            self.assertEqual(self.request(authority, "POST", "/api/session-stop", token=token, body={"client": "claude", "session_id": "missing"})[0], 400)
+            self.assertEqual(self.request(authority, "POST", "/api/unknown", token=token, body={})[0], 404)
+
+    def test_the_protocol_document_matches_the_code(self):
+        # The contract drifted once already: the document advertised seven tools when
+        # there were fifteen. It is only a contract if it fails when it stops being true.
+        protocol = (MODULE.parents[3] / "docs" / "protocol.md").read_text()
+        documented_tools = set(re.findall(r"`(room_[a-z_]+)`", protocol))
+        implemented_tools = {tool["name"] for tool in room.tool_definitions()}
+        self.assertEqual(implemented_tools - documented_tools, set(), "undocumented MCP tools")
+        self.assertEqual(documented_tools - implemented_tools, set(), "documented tools that do not exist")
+
+        documented_routes = set(re.findall(r"`(/api/[a-z-]+)`", protocol))
+        implemented_routes = set(room.HTTP_READ_ROUTES) | set(room.HTTP_WRITE_ROUTES)
+        self.assertEqual(implemented_routes - documented_routes, set(), "undocumented HTTP routes")
+        self.assertEqual(documented_routes - implemented_routes, set(), "documented routes that do not exist")
 
     def test_shared_tables_are_never_written_positionally(self):
         # Several versions of this script share one database on a machine. A positional
