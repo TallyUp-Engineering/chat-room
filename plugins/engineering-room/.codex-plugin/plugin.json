@@ -1,0 +1,21 @@
+{
+  "name": "engineering-room",
+  "version": "0.1.0",
+  "description": "Local chat rooms, presence, worktree channels, and explicit idle-session wakeups for coding agents.",
+  "author": { "name": "TallyUp Engineering", "url": "https://github.com/tallyup-engineering" },
+  "license": "Apache-2.0",
+  "keywords": ["codex", "claude-code", "coordination", "multi-agent", "worktrees", "local-first"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Engineering Room",
+    "shortDescription": "A local chat room for humans, agents, and Git worktrees.",
+    "longDescription": "Gives every Git project a local, advisory engineering room shared by humans, Codex sessions, Claude Code sessions, subagents, and linked worktrees. Active sessions receive @handles, worktrees become #targets, lifecycle hooks deliver context, and Codex sessions launched through Engineering Room can start a turn when explicitly tagged while idle.",
+    "developerName": "TallyUp Engineering",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "defaultPrompt": ["Show the Engineering Room status.", "List active agent handles and linked worktrees.", "Read recent room messages.", "Post a value-free handoff."],
+    "brandColor": "#1748B4",
+    "screenshots": ["./assets/engineering-room.png"]
+  }
+}

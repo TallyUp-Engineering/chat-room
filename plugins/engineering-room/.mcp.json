@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "engineering-room": {
+      "command": "/usr/bin/python3",
+      "args": ["./scripts/room.py", "mcp"],
+      "cwd": ".",
+      "tool_timeout_sec": 30
+    }
+  }
+}

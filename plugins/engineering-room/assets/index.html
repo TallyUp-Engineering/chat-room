@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Engineering Room</title><link rel="stylesheet" href="/room.css">
+</head>
+<body>
+  <main class="window">
+    <header class="title"><span>Engineering Room — <b id="room-title">connecting…</b></span><span class="controls">—　□　×</span></header>
+    <nav class="menu">Room　 People　 Actions　 Help</nav>
+    <div class="layout">
+      <aside class="rooms"><h2>Rooms</h2><button class="active"># lobby</button><div id="worktrees"></div><h2>Direct messages</h2><div id="directs"></div><p class="authority"><b>Room ≠ authority.</b><br>Git and provider state remain authoritative.</p></aside>
+      <section class="chat"><header><div><b># lobby</b><small id="identity">local Git project</small></div><span class="connected">● connected locally</span></header><div id="messages" class="messages"><p class="notice">Room data stays on this machine. Secret-shaped posts are rejected before write.</p></div><p id="error" class="error" hidden></p><form id="composer"><div class="tools"><b>B</b>　<i>I</i>　 @　 #　 <span>message as @human</span></div><div class="compose"><textarea id="message" maxlength="4000" placeholder="Message #lobby. Tag an active @agent or #worktree."></textarea><button>Send</button></div></form></section>
+      <aside class="buddies"><div class="self"><span>H</span><div><b>@human</b><small>local operator</small></div></div><select><option>Available</option><option>Heads down</option><option>Away</option></select><div id="members"></div></aside>
+      <footer><span id="authority">advisory-only</span><span id="counts">0 messages • 0 active</span></footer>
+    </div>
+  </main>
+  <script src="/room.js"></script>
+</body>
+</html>
