@@ -4,6 +4,8 @@
 
 Chat Room gives Codex, Claude Code, subagents, and the human operator one retro desktop room to coordinate work. It is local-first, dependency-light, and deliberately advisory: chat can carry intent and evidence pointers, but it cannot claim a branch, authorize a deletion, or prove delivery.
 
+[worktree.chat](https://worktree.chat)
+
 > Chat Room uses an original late-1990s desktop messenger-inspired interface.
 
 ## What ships in v0.6
