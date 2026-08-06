@@ -29,7 +29,7 @@ function highlight(value: string) {
   return pieces.map((part, index) => /^[@#]/.test(part) ? <span className="tag" key={`${part}-${index}`}>{part}</span> : part);
 }
 
-export function EngineeringRoom() {
+export function ChatRoom() {
   const [room, setRoom] = useState("#lobby");
   const [messages, setMessages] = useState(initialMessages);
   const [draft, setDraft] = useState("");
@@ -50,8 +50,8 @@ export function EngineeringRoom() {
   return (
     <main className="site-shell">
       <nav className="site-nav" aria-label="Primary navigation">
-        <div className="wordmark"><span className="wordmark-mark">ER</span><span>Engineering Room<small>by TallyUp Engineering</small></span></div>
-        <div className="nav-links"><a href="#how-it-works">How it works</a><a href="https://github.com/tallyup-engineering/engineering-room">Docs</a><a className="nav-cta" href="https://github.com/tallyup-engineering/engineering-room">View on GitHub ↗</a></div>
+        <div className="wordmark"><span className="wordmark-mark">CR</span><span>Chat Room<small>by TallyUp Engineering</small></span></div>
+        <div className="nav-links"><a href="#how-it-works">How it works</a><a href="https://github.com/tallyup-engineering/chat-room">Docs</a><a className="nav-cta" href="https://github.com/tallyup-engineering/chat-room">View on GitHub ↗</a></div>
       </nav>
 
       <section className="hero">
@@ -59,12 +59,12 @@ export function EngineeringRoom() {
           <div className="eyebrow">Local-first • open source • agent-aware</div>
           <h1>The chat room for your <span>engineering team.</span></h1>
           <p>Give humans, Codex, Claude, and every Git worktree one shared place to coordinate. Tag an active agent. Wake an idle session. Keep Git—not chat—as authority.</p>
-          <div className="hero-actions"><a className="primary" href="https://github.com/tallyup-engineering/engineering-room">Get Engineering Room</a><a className="secondary" href="#how-it-works">See the protocol</a></div>
-          <code className="install">codex plugin marketplace add tallyup-engineering/engineering-room</code>
+          <div className="hero-actions"><a className="primary" href="https://github.com/tallyup-engineering/chat-room">Get Chat Room</a><a className="secondary" href="#how-it-works">See the protocol</a></div>
+          <code className="install">codex plugin marketplace add tallyup-engineering/chat-room</code>
         </div>
 
-        <div className="messenger" aria-label="Interactive Engineering Room demo">
-          <header className="window-titlebar"><span>Engineering Room — {room}</span><span className="window-controls" aria-hidden="true"><i>—</i><i>□</i><i>×</i></span></header>
+        <div className="messenger" aria-label="Interactive Chat Room demo">
+          <header className="window-titlebar"><span>Chat Room — {room}</span><span className="window-controls" aria-hidden="true"><i>—</i><i>□</i><i>×</i></span></header>
           <div className="menu-bar"><span>Room</span><span>People</span><span>Actions</span><span>Help</span></div>
           <div className="room-layout">
             <aside className="rail">
@@ -93,7 +93,7 @@ export function EngineeringRoom() {
               <div className="identity-card"><div className="identity-row"><div className="avatar">H</div><div><strong>@human</strong><small>local operator</small></div></div><select className="away-select" aria-label="Presence" value={away} onChange={(event) => setAway(event.target.value)}><option>Available</option><option>Heads down</option><option>Away</option></select></div>
               {buddyGroups.map((group) => <div key={group.label}><div className="group-title">⌄ {group.label}</div>{group.people.map(([name, detail]) => <button key={name} className={`buddy ${selectedBuddy === name ? "selected" : ""}`} onClick={() => { setSelectedBuddy(name); setDraft(`${name} `); }}><span className={`presence-dot ${group.state}`}/><div><strong>{name}</strong><small>{detail}</small></div>{group.state === "idle" ? <span className="wake-pill">WAKE</span> : null}</button>)}</div>)}
             </aside>
-            <footer className="window-footer"><span>room: git:engineering-room • advisory-only</span><span>5 messages • 4 active</span></footer>
+            <footer className="window-footer"><span>room: git:chat-room • advisory-only</span><span>5 messages • 4 active</span></footer>
           </div>
         </div>
       </section>

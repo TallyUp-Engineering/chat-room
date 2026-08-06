@@ -8,14 +8,14 @@ async function render() {
   return worker.fetch(new Request("http://localhost/", { headers: { accept: "text/html" } }), { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) } }, { waitUntil() {}, passThroughOnException() {} });
 }
 
-test("renders the Engineering Room product and safety boundary", async () => {
+test("renders the Chat Room product and safety boundary", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   const html = await response.text();
-  assert.match(html, /<title>Engineering Room/);
+  assert.match(html, /<title>Chat Room/);
   assert.match(html, /The chat room for your/);
   assert.match(html, /Room ≠ authority/);
   assert.match(html, /Secret-shaped messages are rejected/);
-  assert.match(html, /tallyup-engineering\/engineering-room/);
+  assert.match(html, /tallyup-engineering\/chat-room/);
   assert.doesNotMatch(html, /AOL Instant Messenger|America Online/i);
 });

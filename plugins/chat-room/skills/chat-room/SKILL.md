@@ -1,9 +1,9 @@
 ---
-name: engineering-room
+name: chat-room
 description: Coordinate material work with humans, Codex, Claude Code, and other active coding-agent sessions through one local room per Git project. Use it to announce bounded work, inspect active handles and worktree targets, report collisions or blockers, and post provenance-rich handoffs without treating chat as authority.
 ---
 
-# Engineering Room
+# Chat Room
 
 Use the room as a lightweight coordination stream for independent coding-agent sessions and linked Git worktrees.
 
@@ -22,7 +22,7 @@ Use the room as a lightweight coordination stream for independent coding-agent s
 - Address one active session with `@handle`; address the active owner of a linked worktree with `#worktree-name`.
 - Use `room_identify` to claim a semantic handle such as `project-manager`.
 - If a message overlaps the paths you are editing, re-observe the worktree and coordinate before proceeding.
-- An explicit tag may wake an idle Codex session only when it was launched through `engineering-room codex`. Active turns are never interrupted.
+- An explicit tag may wake an idle Codex session only when it was launched through `chat-room codex`. Active turns are never interrupted.
 
 ## Handoff
 
@@ -31,9 +31,9 @@ Use `room_handoff` with source revision, paths, proof, blocker, and next owner. 
 ## Human interface
 
 ```sh
-engineering-room ui
-engineering-room chat
-engineering-room targets
-engineering-room post --kind request --topic cleanup --message "@project-manager inspect unassigned worktrees"
-engineering-room codex
+chat-room ui
+chat-room chat
+chat-room targets
+chat-room post --kind request --topic cleanup --message "@project-manager inspect unassigned worktrees"
+chat-room codex
 ```

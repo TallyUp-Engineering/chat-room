@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Engineering Room: a local, advisory message bus for Git worktrees and agents."""
+"""Chat Room: a local, advisory message bus for Git worktrees and agents."""
 
 from __future__ import annotations
 
@@ -29,13 +29,13 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 from urllib.parse import urlparse
 
 
-PLUGIN_NAME = "engineering-room"
+PLUGIN_NAME = "chat-room"
 VERSION = "0.1.0"
 SCHEMA_VERSION = 1
 ACTIVE_WINDOW_SECONDS = 30 * 60
-WAKE_ENDPOINT_ENV = "ENGINEERING_ROOM_WAKE_ENDPOINT"
-CLIENT_ENV = "ENGINEERING_ROOM_CLIENT"
-DATA_ENV = "ENGINEERING_ROOM_DATA"
+WAKE_ENDPOINT_ENV = "CHAT_ROOM_WAKE_ENDPOINT"
+CLIENT_ENV = "CHAT_ROOM_CLIENT"
+DATA_ENV = "CHAT_ROOM_DATA"
 MESSAGE_KINDS = (
     "allocation", "request", "decision", "observation", "update",
     "blocker", "defect", "handoff", "authority", "proposal", "message",
@@ -51,7 +51,7 @@ SECRET_PATTERNS = (
 AGENT_MENTION = re.compile(r"(?<![A-Za-z0-9_@])@\s*([a-z][a-z0-9-]{0,63})", re.I)
 WORKTREE_MENTION = re.compile(r"(?<![A-Za-z0-9_#])#([a-z][a-z0-9-]{0,63})", re.I)
 WAKE_PROMPT = (
-    "You were explicitly tagged in Engineering Room while idle. Read the injected "
+    "You were explicitly tagged in Chat Room while idle. Read the injected "
     "coordination context, re-observe repository state before acting, and reply in the room when useful."
 )
 
@@ -86,7 +86,7 @@ def recently_seen(value: str) -> bool:
 
 def default_data_dir() -> Path:
     value = os.environ.get(DATA_ENV)
-    return Path(value).expanduser().resolve() if value else (Path.home() / ".engineering-room").resolve()
+    return Path(value).expanduser().resolve() if value else (Path.home() / ".chat-room").resolve()
 
 
 def run_git(cwd: Path, *args: str, check: bool = True) -> str:
@@ -293,7 +293,7 @@ class RoomStore:
             self.data_dir.mkdir(parents=True, exist_ok=True)
         finally:
             os.umask(old)
-        self.database_path = self.data_dir / "engineering-room.sqlite3"
+        self.database_path = self.data_dir / "chat-room.sqlite3"
         self.connection = sqlite3.connect(str(self.database_path), timeout=5)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA busy_timeout=5000")
@@ -423,7 +423,7 @@ class RoomStore:
 
 
 def message_from_row(row: sqlite3.Row) -> Dict[str, Any]:
-    return {"id": int(row["id"]), "schema": "engineering-room.message.v1", "room_id": row["room_id"], "timestamp": row["timestamp"], "session_id": row["session_id"], "sender": row["sender"], "recipients": json.loads(row["recipients_json"]), "kind": row["kind"], "topic": row["topic"], "status": row["status"], "message": row["message"], "cwd": row["cwd"], "worktree": row["worktree"], "branch": row["branch"], "head": row["head"], "metadata": json.loads(row["metadata_json"])}
+    return {"id": int(row["id"]), "schema": "chat-room.message.v1", "room_id": row["room_id"], "timestamp": row["timestamp"], "session_id": row["session_id"], "sender": row["sender"], "recipients": json.loads(row["recipients_json"]), "kind": row["kind"], "topic": row["topic"], "status": row["status"], "message": row["message"], "cwd": row["cwd"], "worktree": row["worktree"], "branch": row["branch"], "head": row["head"], "metadata": json.loads(row["metadata_json"])}
 
 
 def select_repository(store: RoomStore, cwd: Optional[str]) -> Repository:
@@ -446,7 +446,7 @@ def compact_context(store: RoomStore, repo: Repository, participant_id: str, eve
     if member is None: return ""
     targets = {member["target"], member["worktree_target"]}
     messages = [m for m in store.recent(repo.room_id, 30) if not m["recipients"] or targets.intersection(m["recipients"])][-10:]
-    lines = [f"Engineering Room (advisory): room={repo.room_id} handle={member['target']} worktree={member['worktree_target']} branch={repo.branch or 'detached'}.", "Use room tools for material coordination. Re-observe repository state before acting."]
+    lines = [f"Chat Room (advisory): room={repo.room_id} handle={member['target']} worktree={member['worktree_target']} branch={repo.branch or 'detached'}.", "Use room tools for material coordination. Re-observe repository state before acting."]
     if messages:
         lines.append("Recent room messages:")
         lines.extend(f"[{m['id']}] {m['kind']} {m['sender']} -> {','.join(m['recipients']) or 'room'}: {m['message']}" for m in messages)
@@ -475,7 +475,7 @@ def run_hook(data_dir: Path) -> int:
             context = compact_context(store, repo, participant, event) if event in CONTEXT_EVENTS else ""
         print(json.dumps(hook_output(event, context), separators=(",", ":")))
     except Exception as error:
-        print(json.dumps({"continue": True, "systemMessage": f"Engineering Room unavailable: {error}"}))
+        print(json.dumps({"continue": True, "systemMessage": f"Chat Room unavailable: {error}"}))
     return 0
 
 
@@ -530,7 +530,7 @@ def run_mcp(data_dir: Path) -> int:
 
 
 class RoomHandler(BaseHTTPRequestHandler):
-    server_version = "EngineeringRoom/0.1"
+    server_version = "ChatRoom/0.1"
     def log_message(self, *_args: Any) -> None: return
     @property
     def app(self) -> "RoomHTTPServer": return self.server  # type: ignore[return-value]
@@ -548,7 +548,7 @@ class RoomHandler(BaseHTTPRequestHandler):
             self.send_response(200); self.send_header("Content-Type", mime); self.send_header("Content-Length", str(len(payload))); self.send_header("Cache-Control", "no-store"); self.end_headers(); self.wfile.write(payload); return
         self.send_error(404)
     def do_POST(self) -> None:
-        if self.headers.get("X-Engineering-Room-Token") != self.app.token: self.send_json({"error": "invalid local token"}, 403); return
+        if self.headers.get("X-Chat-Room-Token") != self.app.token: self.send_json({"error": "invalid local token"}, 403); return
         if urlparse(self.path).path != "/api/messages": self.send_error(404); return
         try:
             length = min(int(self.headers.get("Content-Length", "0")), 16384); body = json.loads(self.rfile.read(length) or b"{}")
@@ -567,7 +567,7 @@ def run_ui(data_dir: Path, cwd: Optional[str], host: str, port: int, no_open: bo
     if host not in ("127.0.0.1", "localhost", "::1"): raise RoomError("the UI binds only to loopback")
     token = hashlib.sha256(os.urandom(32)).hexdigest(); static_dir = Path(__file__).resolve().parents[1] / "assets"
     server = RoomHTTPServer((host, port), repo, data_dir, static_dir, token); url = f"http://{host}:{server.server_address[1]}/#token={token}"
-    print(f"Engineering Room {repo.room_id}\n{url}\nPress Ctrl-C to stop.")
+    print(f"Chat Room {repo.room_id}\n{url}\nPress Ctrl-C to stop.")
     if not no_open: threading.Timer(.3, lambda: webbrowser.open(url)).start()
     try: server.serve_forever()
     except KeyboardInterrupt: pass
@@ -604,7 +604,7 @@ def print_message(item: Dict[str, Any]) -> None:
 
 
 def run_chat(store: RoomStore, repo: Repository, sender: str) -> int:
-    print(f"Engineering Room {repo.room_id} — {repo.project_identity}\nTag active @handles and #worktrees. /help for commands.")
+    print(f"Chat Room {repo.room_id} — {repo.project_identity}\nTag active @handles and #worktrees. /help for commands.")
     recent = store.recent(repo.room_id, 30)
     for item in recent: print_message(item)
     after = recent[-1]["id"] if recent else 0
@@ -630,7 +630,7 @@ def run_chat(store: RoomStore, repo: Repository, sender: str) -> int:
 
 
 def parser() -> argparse.ArgumentParser:
-    value = argparse.ArgumentParser(prog="engineering-room", description="Local chat for humans, coding agents, and Git worktrees")
+    value = argparse.ArgumentParser(prog="chat-room", description="Local chat for humans, coding agents, and Git worktrees")
     value.add_argument("--data-dir", type=Path, default=default_data_dir())
     sub = value.add_subparsers(dest="command", required=True)
     for name in ("status", "targets", "members", "read", "chat", "ui"):
@@ -664,7 +664,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             else: raise RoomError("unknown command")
         print(json.dumps(value, indent=2, sort_keys=True)); return 0
     except RoomError as error:
-        print(f"engineering-room: {error}", file=sys.stderr); return 2
+        print(f"chat-room: {error}", file=sys.stderr); return 2
 
 
 if __name__ == "__main__":

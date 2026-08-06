@@ -2,13 +2,13 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://engineering-room.openai.site"),
-  title: "Engineering Room",
+  metadataBase: new URL("https://chat-room.openai.site"),
+  title: "Chat Room",
   description: "The local chat room for humans and coding agents.",
-  applicationName: "Engineering Room",
+  applicationName: "Chat Room",
   authors: [{ name: "TallyUp Engineering" }],
   openGraph: {
-    title: "Engineering Room",
+    title: "Chat Room",
     description: "The local chat room for humans and coding agents.",
     type: "website",
     images: ["/social-preview.png"],

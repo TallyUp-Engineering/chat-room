@@ -1,6 +1,6 @@
-# Engineering Room protocol
+# Chat Room protocol
 
-Engineering Room is a local coordination plane with five durable concepts.
+Chat Room is a local coordination plane with five durable concepts.
 
 1. **Project room** — a stable hash of normalized repository identity and the resolved Git common directory.
 2. **Session** — an observed Codex, Claude Code, subagent, or human client with presence and an optional semantic handle.
@@ -20,11 +20,11 @@ Engineering Room is a local coordination plane with five durable concepts.
 
 ## MCP tools
 
-`room_status`, `room_read`, `room_members`, `room_targets`, `room_identify`, `room_post`, and `room_handoff` are exposed over stdio MCP. Inputs and outputs are JSON. Message schema is `engineering-room.message.v1`.
+`room_status`, `room_read`, `room_members`, `room_targets`, `room_identify`, `room_post`, and `room_handoff` are exposed over stdio MCP. Inputs and outputs are JSON. Message schema is `chat-room.message.v1`.
 
 ## Local HTTP
 
-`engineering-room ui` exposes a small loopback-only server:
+`chat-room ui` exposes a small loopback-only server:
 
 - `GET /api/snapshot` returns room status, recent messages, and target inventory.
 - `POST /api/messages` posts as `@human` and requires the random token embedded in the launch URL.

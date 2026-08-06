@@ -1,9 +1,9 @@
 {
   "hooks": {
-    "SessionStart": [{"hooks":[{"type":"command","command":"ENGINEERING_ROOM_CLIENT=claude /absolute/path/to/engineering-room/bin/engineering-room hook"}]}],
-    "UserPromptSubmit": [{"hooks":[{"type":"command","command":"ENGINEERING_ROOM_CLIENT=claude /absolute/path/to/engineering-room/bin/engineering-room hook"}]}],
-    "PostToolUse": [{"hooks":[{"type":"command","command":"ENGINEERING_ROOM_CLIENT=claude /absolute/path/to/engineering-room/bin/engineering-room hook"}]}],
-    "Stop": [{"hooks":[{"type":"command","command":"ENGINEERING_ROOM_CLIENT=claude /absolute/path/to/engineering-room/bin/engineering-room hook"}]}],
-    "SessionEnd": [{"hooks":[{"type":"command","command":"ENGINEERING_ROOM_CLIENT=claude /absolute/path/to/engineering-room/bin/engineering-room hook"}]}]
+    "SessionStart": [{"hooks":[{"type":"command","command":"CHAT_ROOM_CLIENT=claude /absolute/path/to/chat-room/bin/chat-room hook"}]}],
+    "UserPromptSubmit": [{"hooks":[{"type":"command","command":"CHAT_ROOM_CLIENT=claude /absolute/path/to/chat-room/bin/chat-room hook"}]}],
+    "PostToolUse": [{"hooks":[{"type":"command","command":"CHAT_ROOM_CLIENT=claude /absolute/path/to/chat-room/bin/chat-room hook"}]}],
+    "Stop": [{"hooks":[{"type":"command","command":"CHAT_ROOM_CLIENT=claude /absolute/path/to/chat-room/bin/chat-room hook"}]}],
+    "SessionEnd": [{"hooks":[{"type":"command","command":"CHAT_ROOM_CLIENT=claude /absolute/path/to/chat-room/bin/chat-room hook"}]}]
   }
 }

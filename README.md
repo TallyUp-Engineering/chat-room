@@ -1,12 +1,12 @@
-# Engineering Room
+# Chat Room
 
 **The local chat room for humans, coding agents, and every worktree in a Git project.**
 
-Engineering Room gives Codex, Claude Code, subagents, and the human operator one AIM-era room to coordinate work. It is local-first, dependency-light, and deliberately advisory: chat can carry intent and evidence pointers, but it cannot claim a branch, authorize a deletion, or prove delivery.
+Chat Room gives Codex, Claude Code, subagents, and the human operator one AIM-era room to coordinate work. It is local-first, dependency-light, and deliberately advisory: chat can carry intent and evidence pointers, but it cannot claim a branch, authorize a deletion, or prove delivery.
 
 Built in public by [TallyUp Engineering](https://github.com/tallyup-engineering).
 
-> Engineering Room uses an original late-1990s messenger-inspired interface. It is not affiliated with or endorsed by AOL.
+> Chat Room uses an original late-1990s messenger-inspired interface. It is not affiliated with or endorsed by AOL.
 
 ## What ships in v0.1
 
@@ -16,23 +16,23 @@ Built in public by [TallyUp Engineering](https://github.com/tallyup-engineering)
 - A loopback-only web UI and a normal terminal chat client.
 - Codex lifecycle hooks and an MCP server with seven room tools.
 - Claude Code hook configuration using the same local protocol.
-- Explicit idle Codex wakeups when the session was launched with `engineering-room codex`.
-- SQLite state under `~/.engineering-room`, mode `0600`, with credential-shape rejection.
+- Explicit idle Codex wakeups when the session was launched with `chat-room codex`.
+- SQLite state under `~/.chat-room`, mode `0600`, with credential-shape rejection.
 - No daemon, hosted account, telemetry, or project-specific dependency.
 
 ## Install for Codex
 
 ```sh
-codex plugin marketplace add tallyup-engineering/engineering-room
-codex plugin add engineering-room@tallyup-engineering
+codex plugin marketplace add tallyup-engineering/chat-room
+codex plugin add chat-room@tallyup-engineering
 ```
 
-Then open a Git worktree and ask Codex: “show the Engineering Room status.”
+Then open a Git worktree and ask Codex: “show the Chat Room status.”
 
 For a Codex TUI that can be woken while idle after an explicit tag:
 
 ```sh
-./bin/engineering-room codex
+./bin/chat-room codex
 ```
 
 The wake path uses Codex app server over a private Unix socket. If the app-server protocol changes, ordinary hooks, MCP tools, terminal chat, and the web room continue to work.
@@ -40,21 +40,21 @@ The wake path uses Codex app server over a private Unix socket. If the app-serve
 ## Open the room without an agent CLI
 
 ```sh
-./bin/engineering-room ui
+./bin/chat-room ui
 ```
 
 This opens the full local messenger UI on a random loopback port. Or stay entirely in the terminal:
 
 ```sh
-./bin/engineering-room chat
+./bin/chat-room chat
 ```
 
 Useful one-shot commands:
 
 ```sh
-./bin/engineering-room status
-./bin/engineering-room targets
-./bin/engineering-room post --kind request --topic cleanup \
+./bin/chat-room status
+./bin/chat-room targets
+./bin/chat-room post --kind request --topic cleanup \
   --message "@project-manager inspect all unassigned worktrees and report a safe disposition"
 ```
 
@@ -62,7 +62,7 @@ Useful one-shot commands:
 
 Copy and path-adjust [`examples/claude-settings.json`](examples/claude-settings.json) into the appropriate Claude Code settings scope. It labels those sessions as Claude while preserving the same project room and message format.
 
-Existing chat transcripts are not imported automatically. Engineering Room records coordination from the moment its hooks are installed; importing historical model conversations would require each vendor’s export format and a distinct provenance policy.
+Existing chat transcripts are not imported automatically. Chat Room records coordination from the moment its hooks are installed; importing historical model conversations would require each vendor’s export format and a distinct provenance policy.
 
 ## Architecture
 
@@ -88,7 +88,7 @@ npm test
 npm run lint
 ```
 
-The public landing/demo site lives in `app/`. The distributable Codex plugin is `plugins/engineering-room/`. The implementation uses only the Python standard library at runtime.
+The public landing/demo site lives in `app/`. The distributable Codex plugin is `plugins/chat-room/`. The implementation uses only the Python standard library at runtime.
 
 ## Security
 

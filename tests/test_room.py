@@ -7,8 +7,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-MODULE = Path(__file__).resolve().parents[1] / "plugins" / "engineering-room" / "scripts" / "room.py"
-SPEC = importlib.util.spec_from_file_location("engineering_room", MODULE)
+MODULE = Path(__file__).resolve().parents[1] / "plugins" / "chat-room" / "scripts" / "room.py"
+SPEC = importlib.util.spec_from_file_location("chat_room", MODULE)
 room = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader
 sys.modules[SPEC.name] = room
@@ -39,7 +39,7 @@ class RoomTests(unittest.TestCase):
             with mock.patch.object(room, "list_worktree_references", return_value=[{"target":"#lane","name":"lane","path":str(repo.worktree),"branch":"lane"}]):
                 message = store.post(repo, "@human", "request", "cleanup", "posted", "@ project-manager inspect #lane", [])
             self.assertEqual(message["recipients"], ["@project-manager", "#lane"])
-            self.assertEqual(store.read(repo.room_id)[0]["schema"], "engineering-room.message.v1")
+            self.assertEqual(store.read(repo.room_id)[0]["schema"], "chat-room.message.v1")
             self.assertEqual(store.status(repo)["authority"], "advisory-only")
 
     def test_unknown_active_handle_is_rejected(self):

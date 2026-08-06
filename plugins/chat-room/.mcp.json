@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "engineering-room": {
+    "chat-room": {
       "command": "/usr/bin/python3",
       "args": ["./scripts/room.py", "mcp"],
       "cwd": ".",
