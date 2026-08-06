@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import stat
@@ -110,6 +111,14 @@ class RoomTests(unittest.TestCase):
         self.assertNotIn("Open in CLI", script)
         self.assertIn('#room-routing[hidden]', (assets / "room.css").read_text())
         self.assertNotIn("setInterval(refreshRoom", script)
+        # Everything a terminal was still needed for has a control in the room.
+        self.assertIn('id="search-form"', html)
+        self.assertIn('id="stop-turn"', html)
+        self.assertIn('id="unread-count"', html)
+        self.assertIn("Start new work", script)
+        self.assertIn("/api/session-start", script)
+        self.assertIn("/api/session-stop", script)
+        self.assertIn("/api/search", script)
 
     def test_terminal_chat_registers_and_releases_cli_presence(self):
         repo = self.repo()
@@ -191,6 +200,114 @@ class RoomTests(unittest.TestCase):
             self.assertEqual(room.merge_conflict_paths(repo, "one", "three"), set())
             self.assertEqual(room.merge_conflict_paths(repo, "one", "one"), set())
             self.assertEqual(room.merge_conflict_paths(repo, "one", "no-such-branch"), set())
+
+    def test_shared_tables_are_never_written_positionally(self):
+        # Several versions of this script share one database on a machine. A positional
+        # INSERT couples every writer to the exact column count, so the next added column
+        # breaks whichever versions are not upgraded in the same instant.
+        offenders = re.findall(r"INSERT (?:OR [A-Z]+ )?INTO (\w+) VALUES", MODULE.read_text())
+        self.assertEqual(offenders, [], f"name the columns for: {sorted(set(offenders))}")
+
+    def test_a_previous_version_can_still_write_presence(self):
+        repo = self.repo()
+        with tempfile.TemporaryDirectory() as temp:
+            with room.RoomStore(Path(temp)) as store:
+                store.upsert_presence(repo, "session:one", "one", None, "claude:lane", "online", "SessionStart")
+            # Exactly what 0.5 emits. It must keep working against a 0.6 database.
+            legacy = sqlite3.connect(str(Path(temp) / "chat-room.sqlite3"))
+            legacy.execute(
+                "INSERT INTO presence VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (repo.room_id, "session:legacy", "legacy", None, "codex:lane", "online", "/p", "/p", "lane", "a" * 40, room.utc_now(), room.utc_now(), "SessionStart", "codex-lane", None),
+            )
+            legacy.commit()
+            legacy.close()
+            with room.RoomStore(Path(temp)) as store:
+                self.assertIn("@codex-lane", [item["target"] for item in store.members(repo.room_id)])
+
+    def test_a_claimed_handle_survives_without_widening_presence(self):
+        repo = self.repo()
+        with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store:
+            store.upsert_presence(repo, "session:one", "one", None, "claude:lane", "online", "SessionStart")
+            store.claim_handle(repo, "one", "release-captain")
+            # A later role change must not drag a deliberately chosen handle along with it.
+            store.upsert_presence(repo, "session:one", "one", None, "claude:other", "online", "PostToolUse")
+            member = next(item for item in store.members(repo.room_id) if item["participant_id"] == "session:one")
+            self.assertEqual(member["target"], "@release-captain")
+            columns = [row[1] for row in store.connection.execute("PRAGMA table_info(presence)")]
+            self.assertNotIn("claimed", columns)
+            self.assertEqual(len(columns), 15)
+
+    def test_started_session_keeps_the_prompt_out_of_process_arguments(self):
+        seen = {}
+
+        class FakeProcess:
+            pid = 4242
+            def __init__(self): self.stdin = io.BytesIO()
+            def poll(self): return None
+
+        def fake_popen(command, **kwargs):
+            seen["command"] = command
+            seen["cwd"] = kwargs.get("cwd")
+            return FakeProcess()
+
+        with tempfile.TemporaryDirectory() as temp:
+            with mock.patch.object(room, "find_cli_executable", return_value="/usr/local/bin/claude"), mock.patch.object(room.subprocess, "Popen", side_effect=fake_popen):
+                room.spawn_cli_turn(Path(temp), "claude", Path(temp), "rebuild the projection", None)
+            self.assertEqual(seen["command"], ["/usr/local/bin/claude", "--print"])
+            self.assertNotIn("rebuild the projection", " ".join(seen["command"]))
+            with mock.patch.object(room, "find_cli_executable", return_value="/usr/local/bin/claude"), mock.patch.object(room.subprocess, "Popen", side_effect=fake_popen):
+                room.spawn_cli_turn(Path(temp), "claude", Path(temp), "carry on", "session-abc")
+            self.assertEqual(seen["command"], ["/usr/local/bin/claude", "--print", "--resume", "session-abc"])
+
+    def test_start_session_refuses_a_worktree_outside_this_project(self):
+        repo = self.repo()
+        with tempfile.TemporaryDirectory() as temp:
+            with mock.patch.object(room, "path_belongs_to_room", return_value=False):
+                with self.assertRaises(room.RoomError):
+                    room.start_session(Path(temp), repo, "claude", temp, "do the thing")
+            with self.assertRaises(room.RoomError):
+                room.start_session(Path(temp), repo, "emacs", temp, "do the thing")
+
+    def test_tagging_an_idle_claude_carries_the_message_into_its_session(self):
+        repo = self.repo()
+        worktrees = [{"target": "#lane", "name": "lane", "path": str(repo.worktree), "branch": "lane"}]
+
+        class FakeProcess:
+            pid = 77
+            def poll(self): return None
+
+        with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store, mock.patch.object(room, "list_worktree_references", return_value=worktrees):
+            store.upsert_presence(repo, "session:one", "claude-session-one", None, "claude:lane", "online", "Stop")
+            with mock.patch.object(room, "spawn_cli_turn", return_value={"process": FakeProcess(), "log": "x", "client": "claude"}) as spawn:
+                posted = store.post(repo, "@human", "message", "general", "posted", "@claude-lane please rebase", [])
+            self.assertEqual(posted["wake"]["started"], ["@claude-lane"])
+            self.assertIn("please rebase", spawn.call_args[0][3])
+            room.CHAT_DELIVERIES.clear()
+
+            # System chatter must never bill a vendor turn, whoever it tags.
+            with mock.patch.object(room, "spawn_cli_turn") as quiet:
+                store.post(repo, "@chat-room", "message", "general", "posted", "@claude-lane overlap noticed", [])
+            quiet.assert_not_called()
+
+            # Neither may an explicitly disabled policy.
+            store.set_option("delivery_policy", "wake_on_tag", "off")
+            with mock.patch.object(room, "spawn_cli_turn") as disabled:
+                store.post(repo, "@human", "message", "general", "posted", "@claude-lane still quiet", [])
+            disabled.assert_not_called()
+
+    def test_search_reaches_past_the_recent_window(self):
+        repo = self.repo()
+        worktrees = [{"target": "#lane", "name": "lane", "path": str(repo.worktree), "branch": "lane"}]
+        with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store, mock.patch.object(room, "list_worktree_references", return_value=worktrees):
+            store.post(repo, "@human", "message", "general", "posted", "the rebase door is closed", [])
+            for index in range(40):
+                store.post(repo, "@human", "message", "general", "posted", f"routine note {index}", [])
+            self.assertEqual(len(store.recent(repo.room_id, 10)), 10)
+            found = store.search(repo.room_id, "rebase door")
+            self.assertEqual([item["message"] for item in found], ["the rebase door is closed"])
+            self.assertEqual(store.search(repo.room_id, "   "), [])
+            # A wildcard must be matched literally rather than widening the search.
+            self.assertEqual(store.search(repo.room_id, "%"), [])
 
     def test_injected_context_only_carries_unseen_messages(self):
         repo = self.repo()

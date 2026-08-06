@@ -118,6 +118,21 @@ function renderRoomMessages(data) {
   messages.scrollTop = stayAtBottom ? messages.scrollHeight : previousTop;
 }
 
+function seenKey() {
+  return `chat-room-seen:${roomData?.status?.room_id || "room"}`;
+}
+
+// Total message count answers "how big is this room", never "did something need me".
+function renderUnread(data) {
+  const badge = document.querySelector("#unread-count");
+  const latest = data.messages.length ? data.messages[data.messages.length - 1].id : 0;
+  const seen = Number(localStorage.getItem(seenKey()) || 0);
+  const unread = data.messages.filter(item => item.id > seen).length;
+  badge.textContent = unread ? `${unread} new` : "";
+  badge.hidden = unread === 0;
+  if (currentView.kind === "room-log" && latest > seen) localStorage.setItem(seenKey(), String(latest));
+}
+
 function renderRoomLog(data) {
   const items = data.messages;
   if (!changed("room-log", items.map(item => [item.id, item.status, item.message]))) return;
@@ -150,13 +165,54 @@ function renderConsoleLanding(data) {
   const signature = { online: online.map(agent => agent.target), idle: idle.map(agent => agent.target), questions, chatter, shared };
   if (!changed("console-landing", signature)) return;
   const messages = document.querySelector("#messages");
-  messages.innerHTML = `<section class="activation-panel"><span class="activation-state"><i></i> READY</span><h1>What do you want to activate?</h1><p>${online.length} active worker${online.length === 1 ? '' : 's'}${idle.length ? ` · ${idle.length} idle` : ''}. Nothing is sent until you choose a route.</p><div class="activation-grid"><button type="button" data-console-action="all"${online.length ? '' : ' disabled'}><b>Message everyone</b><small>Send one room message to all active workers.</small></button><button type="button" data-console-action="tag"${online.length ? '' : ' disabled'}><b>Tag a worker</b><small>Choose one active Codex or Claude session.</small></button><button type="button" data-console-action="human"><b>Ask a human question</b><small>Open a durable question with its reason and source.</small></button><button type="button" data-console-action="chatter"><b>Start agent chatter</b><small>Activate a focused agent-only coordination thread.</small></button></div><div class="activation-foot"><span>${questions} human question${questions === 1 ? '' : 's'} · ${chatter} chatter thread${chatter === 1 ? '' : 's'}${shared ? ` · ${shared} shared-worktree signal${shared === 1 ? '' : 's'}` : ''}</span><button type="button" data-console-action="chats">Choose a chat</button><button type="button" data-console-action="log">View room log</button></div></section>`;
+  messages.innerHTML = `<section class="activation-panel"><span class="activation-state"><i></i> READY</span><h1>What do you want to activate?</h1><p>${online.length} active worker${online.length === 1 ? '' : 's'}${idle.length ? ` · ${idle.length} idle` : ''}. Nothing is sent until you choose a route.</p><div class="activation-grid"><button type="button" data-console-action="all"${online.length ? '' : ' disabled'}><b>Message everyone</b><small>Send one room message to all active workers.</small></button><button type="button" data-console-action="tag"${online.length ? '' : ' disabled'}><b>Tag a worker</b><small>Choose one active Codex or Claude session.</small></button><button type="button" data-console-action="human"><b>Ask a human question</b><small>Open a durable question with its reason and source.</small></button><button type="button" data-console-action="chatter"><b>Start agent chatter</b><small>Activate a focused agent-only coordination thread.</small></button><button type="button" data-console-action="start"><b>Start new work</b><small>Open a Claude or Codex session in a worktree. Bills vendor tokens.</small></button></div><div class="activation-foot"><span>${questions} human question${questions === 1 ? '' : 's'} · ${chatter} chatter thread${chatter === 1 ? '' : 's'}${shared ? ` · ${shared} shared-worktree signal${shared === 1 ? '' : 's'}` : ''}</span><button type="button" data-console-action="chats">Choose a chat</button><button type="button" data-console-action="log">View room log</button></div></section>`;
   messages.querySelector('[data-console-action="all"]').onclick = () => activateConsole("all");
   messages.querySelector('[data-console-action="tag"]').onclick = () => activateConsole("tag");
   messages.querySelector('[data-console-action="human"]').onclick = () => document.querySelector("#new-human-thread").click();
   messages.querySelector('[data-console-action="chatter"]').onclick = () => document.querySelector("#new-thread").click();
   messages.querySelector('[data-console-action="chats"]').onclick = () => { document.querySelector("#chats-section").open = true; document.querySelector("#chat-filter").focus(); };
   messages.querySelector('[data-console-action="log"]').onclick = openRoomLog;
+  messages.querySelector('[data-console-action="start"]').onclick = openStartWork;
+}
+
+function openStartWork() {
+  clearImages();
+  consoleComposerActive = false;
+  currentView = { kind: "start", id: "start" };
+  document.querySelector("#stop-turn").hidden = true;
+  document.querySelector("#chat-pane").classList.remove("history-mode");
+  document.querySelector("#view-title").textContent = "Start new work";
+  document.querySelector("#identity").textContent = "One local CLI session in a worktree of this project";
+  setStatus("ready", "status-live");
+  document.querySelector("#close-thread").hidden = true;
+  document.querySelector("#rename-view").hidden = true;
+  document.querySelector("#composer").hidden = true;
+  document.querySelector("#combined-room").classList.remove("active");
+  const worktrees = roomData?.targets?.worktrees || [];
+  const messages = resetMessages("This starts a real vendor CLI session in the chosen worktree and bills vendor tokens. Its transcript appears under Chats once the session writes.");
+  const form = document.createElement("form");
+  form.className = "start-form";
+  form.innerHTML = `<label>Agent<select id="start-client"><option value="claude">Claude</option><option value="codex">Codex</option></select></label>`
+    + `<label>Worktree<select id="start-worktree">${worktrees.map(item => `<option value="${esc(item.path)}">${esc(item.target)}${item.branch ? ` · ${esc(item.branch)}` : ''}</option>`).join('')}</select></label>`
+    + `<label>First instruction<textarea id="start-prompt" maxlength="4000" required placeholder="What should this session do?"></textarea></label>`
+    + `<span><button type="submit">Start session</button><button type="button" data-cancel-start>Cancel</button></span>`;
+  messages.append(form);
+  form.querySelector("[data-cancel-start]").onclick = openRoom;
+  form.onsubmit = async event => {
+    event.preventDefault();
+    const button = form.querySelector('button[type="submit"]');
+    button.disabled = true;
+    try {
+      const started = await request("/api/session-start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+        client: form.querySelector("#start-client").value,
+        worktree: form.querySelector("#start-worktree").value,
+        prompt: form.querySelector("#start-prompt").value,
+      }) });
+      resetMessages(`Started ${started.client} in ${started.worktree_target} as pid ${started.pid}. Its transcript appears under Chats once the session writes.`);
+      clearError();
+      await refreshCatalog();
+    } catch (error) { button.disabled = false; showError(error); }
+  };
 }
 
 function renderThreads(threads) {
@@ -225,6 +281,7 @@ function renderSnapshot(data) {
   const idle = data.targets.agents.filter(agent => agent.state === "idle");
   const offline = data.targets.agents.filter(agent => agent.state === "offline");
   document.querySelector("#combined-count").textContent = online.length;
+  renderUnread(data);
   document.querySelector("#counts").textContent = `${online.length} active • ${idle.length} idle • ${data.threads.length} open threads`;
   if (changed("active-agents", online)) document.querySelector("#active-agents").innerHTML = online.length ? online.map(agent => `<button class="active-agent" data-target="${esc(agent.target)}"><span class="dot"></span><b>${esc(agent.target)}</b><small>${esc(String(agent.role || 'agent').split(':')[0])}</small></button>`).join('') : '<p class="nav-empty">No active agents in this room.</p>';
   if (changed("members", { online, idle, offline })) document.querySelector("#members").innerHTML = `<div class="group">⌄ Online — ${online.length}</div>${online.map(buddy).join('')}<div class="group">⌄ Idle — ${idle.length}</div>${idle.map(buddy).join('')}<div class="group">⌄ Offline — ${offline.length}</div>${offline.map(buddy).join('')}`;
@@ -236,6 +293,7 @@ function renderSnapshot(data) {
 
 function renderRoomView() {
   if (!roomData) return;
+  document.querySelector("#stop-turn").hidden = true;
   if (currentView.kind === "room-log") {
     document.querySelector("#chat-pane").classList.remove("history-mode");
     document.querySelector("#view-title").textContent = "Room Log";
@@ -288,6 +346,34 @@ function openThread(threadId) {
   renderRoomView();
 }
 
+async function openSearch(query) {
+  const text = query.trim();
+  if (!text) return;
+  clearImages();
+  consoleComposerActive = false;
+  currentView = { kind: "search", id: text };
+  document.querySelector("#stop-turn").hidden = true;
+  document.querySelector("#chat-pane").classList.remove("history-mode");
+  document.querySelector("#view-title").textContent = `Search · ${text}`;
+  document.querySelector("#close-thread").hidden = true;
+  document.querySelector("#rename-view").hidden = true;
+  document.querySelector("#composer").hidden = true;
+  document.querySelector("#combined-room").classList.remove("active");
+  setStatus("search", "status-idle");
+  try {
+    const found = await request(`/api/search?q=${encodeURIComponent(text)}`);
+    document.querySelector("#identity").textContent = `${found.messages.length} matching message${found.messages.length === 1 ? '' : 's'} across the whole room`;
+    const messages = resetMessages(found.messages.length ? "Whole-room history, not just the recent window." : "No message in this room matches that.");
+    for (const message of found.messages) {
+      const row = document.createElement("div");
+      row.className = "msg";
+      row.innerHTML = `<div class="meta"><b>${esc(message.sender)}</b>${time(message.timestamp)}</div><div><span class="kind">${esc(message.kind)}</span>${rich(message.message)}</div>`;
+      messages.append(row);
+    }
+    clearError();
+  } catch (error) { showError(error); }
+}
+
 function openRoomLog() {
   clearImages();
   consoleComposerActive = false;
@@ -316,6 +402,7 @@ function renderCatalog(data) {
 
 function openInactivePanel() {
   clearImages();
+  document.querySelector("#stop-turn").hidden = true;
   consoleComposerActive = false;
   const liveSessions = new Set((roomData?.targets?.agents || []).map(agent => agent.session_id).filter(Boolean));
   const inactive = catalogData.chats.filter(chat => !liveSessions.has(chat.id) && chat.recency === "inactive");
@@ -363,6 +450,15 @@ function renderHistory(data) {
   document.querySelector("#chat-pane").classList.add("history-mode");
   document.querySelector("#view-title").textContent = data.chat.title;
   document.querySelector("#identity").textContent = `${data.chat.client} · ${data.chat.worktree} · ${data.delivery.label}`;
+  const stop = document.querySelector("#stop-turn");
+  stop.hidden = data.delivery.mode !== "running";
+  stop.onclick = async () => {
+    try {
+      await request("/api/session-stop", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ client: data.chat.client, session_id: data.chat.id }) });
+      await refreshCurrentHistory();
+      clearError();
+    } catch (error) { showError(error); }
+  };
   if (data.delivery.mode === "running") setStatus("responding", "status-busy");
   else if (data.delivery.mode === "active-unattached") setStatus("active elsewhere", "status-busy");
   else if (data.delivery.ready) setStatus("ready", "connected");
@@ -409,6 +505,10 @@ async function refreshCatalog() {
 }
 
 document.querySelector("#combined-room").onclick = openRoom;
+document.querySelector("#search-form").addEventListener("submit", event => {
+  event.preventDefault();
+  openSearch(document.querySelector("#search-input").value);
+});
 document.querySelector("#chat-filter").oninput = () => renderCatalog(catalogData);
 document.querySelector("#chat-status-filter").onchange = () => renderCatalog(catalogData);
 document.querySelector("#list-inactive").onclick = openInactivePanel;

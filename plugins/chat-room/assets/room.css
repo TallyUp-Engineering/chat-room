@@ -135,6 +135,20 @@ h2 {
   font-size: var(--fs-nano);
   font-style: normal;
 }
+.unread { min-width: 19px; margin-left: auto; padding: 2px 6px; border-radius: 10px; background: #1748b4; color: #fff; text-align: center; font-size: var(--fs-nano); font-style: normal; font-weight: 700; }
+.room-search { margin: 5px 3px 2px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px; }
+.room-search input { min-width: 0; padding: 6px 8px; border: 1px solid #91a4c8; border-radius: 4px; background: #fff; color: #26385e; font-size: var(--fs-nano); outline: none; }
+.room-search input:focus { box-shadow: 0 0 0 2px #bfd1f4; }
+.rooms .room-search button { width: auto; justify-content: center; padding: 4px 9px; border: 1px solid #91a4c8; background: #edf3ff; color: #405781; font-size: var(--fs-nano); }
+.start-form { margin: 0 14px; display: grid; gap: 10px; max-width: 520px; }
+.start-form label { display: grid; gap: 4px; color: #4e607f; font-size: var(--fs-micro); font-weight: 700; }
+.start-form select, .start-form textarea { padding: 7px; border: 1px solid #91a4c8; border-radius: 3px; background: #fff; color: var(--ink); font: inherit; font-weight: 400; outline: none; }
+.start-form textarea { min-height: 96px; resize: vertical; }
+.start-form select:focus, .start-form textarea:focus { box-shadow: 0 0 0 2px #bfd1f4; }
+.start-form span { display: flex; gap: 8px; }
+.start-form button { padding: 7px 14px; border: 1px solid #123d9a; border-radius: 4px; background: linear-gradient(#3e75db, #1544aa); color: #fff; font-weight: 700; cursor: pointer; }
+.start-form button[data-cancel-start] { border-color: #8ba0c6; background: #fff; color: #40557d; font-weight: 400; }
+.start-form button:disabled { cursor: not-allowed; opacity: .55; }
 .room-hint {
   margin: 7px 4px 10px;
   padding: 7px 8px;
