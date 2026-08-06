@@ -407,6 +407,41 @@ def preemptive_conflicts(repo: Repository) -> List[Dict[str, Any]]:
         return cached[1] if cached else []
 
 
+def coordination_alerts(targets: Dict[str, Any], threads: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    alerts: List[Dict[str, Any]] = []
+    agents = list(targets.get("agents") or [])
+    for worktree in targets.get("worktrees") or []:
+        count = int(worktree.get("active_agents") or 0)
+        if count < 2:
+            continue
+        participants = [str(worktree["target"])]
+        participants.extend(str(agent["target"]) for agent in agents if str(agent.get("worktree") or "") == str(worktree.get("path") or ""))
+        alerts.append({
+            "id": "shared-worktree-" + hashlib.sha256(str(worktree["path"]).encode()).hexdigest()[:10],
+            "type": "shared-worktree", "severity": "warning", "icon": "shared-worktree",
+            "title": f"{count} workers in {worktree['target']}",
+            "detail": "Coordinate ownership before either actor writes.",
+            "participants": participants, "paths": [], "thread_id": None,
+        })
+    for thread in threads:
+        if thread["source"] == "preemptive-conflict":
+            alert_type, icon, severity = "file-overlap", "file-overlap", "warning"
+        elif thread["reason"] == "design direction":
+            alert_type, icon, severity = "decision-needed", "decision-needed", "attention"
+        elif thread["reason"] == "blocker":
+            alert_type, icon, severity = "blocker", "blocker", "critical"
+        elif thread["reason"] == "handoff":
+            alert_type, icon, severity = "handoff", "handoff", "attention"
+        else:
+            continue
+        alerts.append({
+            "id": f"{alert_type}-{thread['id']}", "type": alert_type, "severity": severity, "icon": icon,
+            "title": thread["title"], "detail": thread["reason"], "participants": thread["participants"],
+            "paths": thread["paths"], "thread_id": thread["id"],
+        })
+    return alerts
+
+
 def client_name() -> str:
     value = os.environ.get(CLIENT_ENV, "codex").strip().lower()
     return value if value in ("codex", "claude", "human") else "agent"
@@ -855,7 +890,8 @@ class RoomHandler(BaseHTTPRequestHandler):
         if path == "/api/snapshot":
             with RoomStore(self.app.data_dir) as store:
                 threads = store.sync_preemptive_conflicts(self.app.repo)
-                self.send_json({"status": store.status(self.app.repo), "messages": store.recent(self.app.repo.room_id, 2000), "targets": store.targets(self.app.repo), "threads": threads})
+                targets = store.targets(self.app.repo)
+                self.send_json({"status": store.status(self.app.repo), "messages": store.recent(self.app.repo.room_id, 2000), "targets": targets, "threads": threads, "alerts": coordination_alerts(targets, threads)})
             return
         if path == "/api/chats":
             if not self.authorized(): self.send_json({"error": "invalid local token"}, 403); return
@@ -870,7 +906,7 @@ class RoomHandler(BaseHTTPRequestHandler):
             except RoomError as error:
                 self.send_json({"error": str(error)}, 404)
             return
-        static = {"/": ("index.html", "text/html; charset=utf-8"), "/room.css": ("room.css", "text/css"), "/room.js": ("room.js", "text/javascript")}
+        static = {"/": ("index.html", "text/html; charset=utf-8"), "/room.css": ("room.css", "text/css"), "/room.js": ("room.js", "text/javascript"), "/icons.svg": ("icons.svg", "image/svg+xml")}
         if path in static:
             file_name, mime = static[path]; payload = (self.app.static_dir / file_name).read_bytes()
             self.send_response(200); self.send_header("Content-Type", mime); self.send_header("Content-Length", str(len(payload))); self.send_header("Cache-Control", "no-store")

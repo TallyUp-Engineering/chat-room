@@ -114,6 +114,17 @@ class RoomTests(unittest.TestCase):
             self.assertEqual(threads[0]["source"], "preemptive-conflict")
             self.assertEqual(threads[0]["participants"], ["#lane-one", "#lane-two"])
 
+    def test_coordination_alerts_derive_from_worktree_and_thread_indexes(self):
+        targets = {
+            "worktrees": [{"target": "#lane", "path": "/project/lane", "active_agents": 2}],
+            "agents": [{"target": "@one", "worktree": "/project/lane"}, {"target": "@two", "worktree": "/project/lane"}],
+        }
+        threads = [{"id": "conflict-a", "source": "preemptive-conflict", "reason": "preemptive file overlap", "title": "Potential conflict: app/ui.tsx", "participants": ["#one", "#two"], "paths": ["app/ui.tsx"]}]
+        alerts = room.coordination_alerts(targets, threads)
+        self.assertEqual([item["type"] for item in alerts], ["shared-worktree", "file-overlap"])
+        self.assertEqual(alerts[0]["participants"], ["#lane", "@one", "@two"])
+        self.assertEqual(alerts[1]["thread_id"], "conflict-a")
+
     def test_codex_history_exposes_only_user_and_assistant_messages(self):
         repo = self.repo()
         with tempfile.TemporaryDirectory() as temp:

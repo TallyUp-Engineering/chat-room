@@ -7,6 +7,7 @@ let catalogData = { chats: [] };
 const esc = value => String(value ?? "").replace(/[&<>"']/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[character]);
 const rich = value => esc(value).replace(/(^|\s)([@#][a-z0-9-]+)/gi, '$1<span class="tag">$2</span>');
 const time = value => value ? new Date(value).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "";
+const icon = name => `<svg class="alert-icon" aria-hidden="true"><use href="/icons.svg#${esc(name)}"></use></svg>`;
 
 async function request(url, options = {}) {
   const response = await fetch(url, { cache: "no-store", ...options, headers: { ...authHeaders, ...(options.headers || {}) } });
@@ -64,6 +65,20 @@ function renderThreads(threads) {
   container.querySelectorAll("[data-thread]").forEach(node => { node.onclick = () => openThread(node.dataset.thread); });
 }
 
+function renderAlerts(alerts) {
+  document.querySelector("#alert-count").textContent = alerts.length;
+  document.querySelector("#alerts").innerHTML = alerts.map((alert, index) => `<article class="alert-item ${esc(alert.severity)}">${icon(alert.icon)}<div class="alert-copy"><b>${esc(alert.title)}</b><small>${esc(alert.detail)}</small></div><button data-alert="${index}">${alert.thread_id ? 'Open' : 'Settle'}</button></article>`).join("") || '<p class="nav-empty">No coordination alerts.</p>';
+  document.querySelectorAll("[data-alert]").forEach(node => { node.onclick = () => settleAlert(alerts[Number(node.dataset.alert)]); });
+}
+
+async function settleAlert(alert) {
+  if (alert.thread_id) { openThread(alert.thread_id); return; }
+  try {
+    const thread = await request("/api/threads", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: alert.title, reason: alert.type.replaceAll('-', ' '), participants: alert.participants, paths: alert.paths }) });
+    await refreshRoom(); openThread(thread.id); clearError();
+  } catch (error) { showError(error); }
+}
+
 function renderSnapshot(data) {
   roomData = data;
   document.querySelector("#room-title").textContent = data.status.room_id;
@@ -72,6 +87,7 @@ function renderSnapshot(data) {
   document.querySelector("#combined-count").textContent = data.messages.length;
   document.querySelector("#worktree-count").textContent = data.targets.worktrees.length;
   document.querySelector("#worktrees").innerHTML = data.targets.worktrees.map(worktree => `<button data-target="${esc(worktree.target)}"># ${esc(worktree.name)} ${worktree.active_agents ? `(${worktree.active_agents})` : ''}</button>`).join("");
+  renderAlerts(data.alerts || []);
   renderThreads(data.threads || []);
   const online = data.targets.agents.filter(agent => agent.state === "online");
   const idle = data.targets.agents.filter(agent => agent.state === "idle");

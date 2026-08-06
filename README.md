@@ -17,6 +17,7 @@ Built in public by [TallyUp Engineering](https://github.com/tallyup-engineering)
 - Live/recent/stale/inactive chat status, filtering, and a non-destructive inactive review queue.
 - Manual coordination threads for design direction, review, handoff, and blockers.
 - Automatic advisory threads when multiple worktrees currently modify the same path.
+- Derived alert cards for shared-worktree actors, file overlaps, design decisions, blockers, and handoffs, with one settlement CTA.
 - A loopback-only web UI and a normal terminal chat client.
 - Codex lifecycle hooks and an MCP server with ten room tools.
 - Claude Code hook configuration using the same local protocol.
