@@ -4,8 +4,6 @@
 
 Chat Room gives Codex, Claude Code, subagents, and the human operator one retro desktop room to coordinate work. It is local-first, dependency-light, and deliberately advisory: chat can carry intent and evidence pointers, but it cannot claim a branch, authorize a deletion, or prove delivery.
 
-Built in public by [TallyUp Engineering](https://github.com/tallyup-engineering).
-
 > Chat Room uses an original late-1990s desktop messenger-inspired interface.
 
 ## What ships in v0.6
@@ -92,8 +90,8 @@ directly, so an absent index costs speed and never function.
 ## Install for Codex
 
 ```sh
-codex plugin marketplace add tallyup-engineering/chat-room
-codex plugin add chat-room@tallyup-engineering
+codex plugin marketplace add TallyUp-Engineering/chat-room
+codex plugin add chat-room@chat-room
 ```
 
 Then open a Git worktree and ask Codex: “show the Chat Room status.”

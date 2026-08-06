@@ -1,6 +1,6 @@
 {
-  "name": "tallyup-engineering",
-  "owner": { "name": "TallyUp Engineering", "email": "engineering@tallyupnow.com" },
+  "name": "chat-room",
+  "owner": { "name": "Chat Room" },
   "plugins": [
     {
       "name": "chat-room",

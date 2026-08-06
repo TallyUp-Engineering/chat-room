@@ -6,7 +6,7 @@ export const metadata: Metadata = {
   title: "Chat Room",
   description: "The local chat room for humans and coding agents.",
   applicationName: "Chat Room",
-  authors: [{ name: "TallyUp Engineering" }],
+  authors: [{ name: "Chat Room" }],
   openGraph: {
     title: "Chat Room",
     description: "The local chat room for humans and coding agents.",
