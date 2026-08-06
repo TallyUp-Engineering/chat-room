@@ -115,6 +115,17 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .room-item.session.selected { background: rgba(255,255,255,.8); box-shadow: inset 0 0 0 1px #b9c8e4; }
 .room-item.session .presence-dot { width: 8px; height: 8px; }
 .adapter-note { margin: 3px 3px 10px; padding: 7px; border: 1px dashed #91a8d1; border-radius: 4px; color: #516889; text-align: center; font-size: 8px; line-height: 1.35; }
+.nav-section { display: block; margin-bottom: 7px; }
+.nav-section > summary { padding: 6px 7px; display: flex; align-items: center; gap: 5px; color: #455678; cursor: pointer; font-size: 9px; font-weight: 900; letter-spacing: .08em; list-style: none; text-transform: uppercase; }
+.nav-section > summary::-webkit-details-marker { display: none; }
+.nav-section > summary::before { content: "▸"; }
+.nav-section[open] > summary::before { content: "⌄"; }
+.nav-section > summary b { margin-left: auto; min-width: 18px; padding: 1px 5px; border-radius: 9px; background: #cbdaf5; color: #385486; text-align: center; font-size: 8px; }
+.room-item.thread-item { padding-left: 17px; }
+.room-item.thread-item > span:last-child { min-width: 0; flex: 1; }
+.thread-icon, .history-icon { width: 18px; height: 18px; display: grid; flex: 0 0 auto; place-items: center; border-radius: 4px; background: #fff0b3; color: #705a00; font-size: 8px; font-weight: 900; }
+.history-icon { background: #d6e3fb; color: #2852a2; }
+.add-interface { width: 100%; margin-top: 4px; padding: 7px; border: 1px dashed #91a8d1; border-radius: 4px; background: transparent; color: #516889; font-size: 8px; cursor: pointer; }
 .rail-note { margin-top: 12px; padding: 9px; border: 1px solid #b3c4e4; border-radius: 5px; background: rgba(255,255,255,.52); color: #566582; font-size: 9px; line-height: 1.5; }
 
 .chat-pane { min-width: 0; display: grid; grid-template-rows: auto 1fr auto auto; background: #fff; }

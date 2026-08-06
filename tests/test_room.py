@@ -1,5 +1,6 @@
 import importlib.util
 import io
+import json
 import os
 import sqlite3
 import sys
@@ -74,10 +75,11 @@ class RoomTests(unittest.TestCase):
         assets = MODULE.parents[1] / "assets"
         html = (assets / "index.html").read_text()
         script = (assets / "room.js").read_text()
-        self.assertIn("Combined Chat Room", html)
-        self.assertIn('id="interfaces"', html)
-        self.assertIn("interfaceGroups(data.targets.agents)", script)
-        self.assertIn("['Codex',[]],['CLI',[]]", script)
+        self.assertIn("All activity", html)
+        self.assertIn('id="chats"', html)
+        self.assertIn('id="worktrees"', html)
+        self.assertIn("openHistory", script)
+        self.assertIn("openThread", script)
 
     def test_terminal_chat_registers_and_releases_cli_presence(self):
         repo = self.repo()
@@ -87,6 +89,49 @@ class RoomTests(unittest.TestCase):
             member = next(item for item in store.members(repo.room_id) if item["role"].startswith("cli:"))
             self.assertEqual(member["state"], "offline")
             self.assertEqual(member["last_event"], "ChatEnd")
+
+    def test_manual_thread_routes_by_central_reference(self):
+        repo = self.repo()
+        worktrees = [{"target": "#lane", "name": "lane", "path": str(repo.worktree), "branch": "lane"}]
+        with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store, mock.patch.object(room, "list_worktree_references", return_value=worktrees):
+            thread = store.open_thread(repo, "Choose the interface direction", "design direction", "@human", ["#lane"], ["app/ui.tsx"])
+            posted = store.post_thread(repo, thread["id"], "@human", "@human should the navigation be vertical?")
+            self.assertEqual(posted["topic"], f"thread:{thread['id']}")
+            self.assertEqual(posted["metadata"]["thread_id"], thread["id"])
+            self.assertEqual(posted["recipients"], ["#lane", "@human"])
+            self.assertEqual(store.close_thread(repo, thread["id"])["status"], "resolved")
+
+    def test_preemptive_overlap_opens_thread_without_changing_git(self):
+        repo = self.repo()
+        worktrees = [
+            {"target": "#lane-one", "name": "lane-one", "path": "/project/one", "branch": "one"},
+            {"target": "#lane-two", "name": "lane-two", "path": "/project/two", "branch": "two"},
+        ]
+        conflicts = [{"path": "app/ui.tsx", "worktrees": worktrees}]
+        with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store, mock.patch.object(room, "list_worktree_references", return_value=worktrees), mock.patch.dict(room.CONFLICT_SCANS, {repo.room_id: (room.time.monotonic(), conflicts)}, clear=True):
+            threads = store.sync_preemptive_conflicts(repo)
+            self.assertEqual(len(threads), 1)
+            self.assertEqual(threads[0]["source"], "preemptive-conflict")
+            self.assertEqual(threads[0]["participants"], ["#lane-one", "#lane-two"])
+
+    def test_codex_history_exposes_only_user_and_assistant_messages(self):
+        repo = self.repo()
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "session.jsonl"
+            path.write_text("\n".join([
+                json.dumps({"type": "event_msg", "timestamp": "2026-01-01T00:00:00Z", "payload": {"type": "user_message", "message": "hello"}}),
+                json.dumps({"type": "response_item", "payload": {"type": "reasoning", "content": "hidden"}}),
+                json.dumps({"type": "event_msg", "timestamp": "2026-01-01T00:00:01Z", "payload": {"type": "agent_message", "message": "hi"}}),
+            ]))
+            summary = {"client": "Codex", "id": "session-a", "title": "Hello", "updated_at": "2026-01-01T00:00:01Z", "worktree": "lane", "read_only": True}
+            with mock.patch.object(room, "discover_chat_catalog", return_value=([summary], {("codex", "session-a"): path})):
+                history = room.chat_transcript(repo, "Codex", "session-a")
+            self.assertEqual([item["body"] for item in history["messages"]], ["hello", "hi"])
+
+    def test_ui_defaults_to_durable_loopback_name(self):
+        args = room.parser().parse_args(["ui"])
+        self.assertEqual(args.hostname, "chatroom.localhost")
+        self.assertEqual(args.port, 7391)
 
 
 if __name__ == "__main__": unittest.main()

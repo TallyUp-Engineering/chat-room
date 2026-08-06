@@ -8,14 +8,16 @@ Built in public by [TallyUp Engineering](https://github.com/tallyup-engineering)
 
 > Chat Room uses an original late-1990s desktop messenger-inspired interface.
 
-## What ships in v0.1
+## What ships in v0.2
 
 - One room per Git common directory, shared automatically by linked worktrees.
 - Active `@agent` handles and independent `#worktree` targets.
 - Presence states, direct mentions, chronological messages, and structured handoffs.
-- A combined room pinned above live chats grouped automatically by Codex, CLI, Claude, or any other adapter.
+- A combined room pinned above read-only local Codex and Claude chat histories, with worktrees kept as a separate collapsible target index.
+- Manual coordination threads for design direction, review, handoff, and blockers.
+- Automatic advisory threads when multiple worktrees currently modify the same path.
 - A loopback-only web UI and a normal terminal chat client.
-- Codex lifecycle hooks and an MCP server with seven room tools.
+- Codex lifecycle hooks and an MCP server with ten room tools.
 - Claude Code hook configuration using the same local protocol.
 - Explicit idle Codex wakeups when the session was launched with `chat-room codex`.
 - SQLite state under `~/.chat-room`, mode `0600`, with credential-shape rejection.
@@ -52,7 +54,24 @@ The wake path uses Codex app server over a private Unix socket. If the app-serve
 chat-room ui
 ```
 
-This opens the full local messenger UI on a random loopback port. Or stay entirely in the terminal:
+This opens the full local messenger UI at the durable, bookmarkable `http://chatroom.localhost:7391/`. The server still binds only to loopback, validates the browser hostname, and uses a same-origin local write cookie.
+
+Choose a different machine-local bookmark without editing DNS or `/etc/hosts`:
+
+```sh
+chat-room ui --hostname my-team.localhost --port 7392
+```
+
+On macOS, opt into a user-level launchd service so the bookmark survives terminal and browser restarts:
+
+```sh
+chat-room service install --cwd .
+chat-room service status
+```
+
+The reversible removal command is `chat-room service uninstall`.
+
+Or stay entirely in the terminal:
 
 ```sh
 chat-room chat
@@ -63,6 +82,9 @@ Useful one-shot commands:
 ```sh
 chat-room status
 chat-room targets
+chat-room threads
+chat-room thread-open --title "Choose navigation direction" \
+  --reason "design direction" --participant @human --participant @ui-agent
 chat-room post --kind request --topic cleanup \
   --message "@project-manager inspect all unassigned worktrees and report a safe disposition"
 ```
@@ -71,7 +93,7 @@ chat-room post --kind request --topic cleanup \
 
 Copy and path-adjust [`examples/claude-settings.json`](examples/claude-settings.json) into the appropriate Claude Code settings scope. It labels those sessions as Claude while preserving the same project room and message format.
 
-Existing chat transcripts are not imported automatically. Chat Room records coordination from the moment its hooks are installed; importing historical model conversations would require each vendor’s export format and a distinct provenance policy.
+Existing Codex and Claude transcripts are indexed directly from their local session stores and displayed read-only. Only user and assistant text is rendered; tool calls, hidden instructions, and reasoning are omitted. History remains in the vendor-owned files and is never imported into Chat Room’s SQLite database.
 
 ## Architecture
 
@@ -80,7 +102,8 @@ Codex hooks ─┐
 Claude hooks ├── local Python protocol ── SQLite (one logical room per Git project)
 MCP tools ───┤              │
 Terminal UI ─┤              ├── loopback browser UI
-Web UI ──────┘              └── explicit idle-session wake over Unix socket
+Web UI ──────┘              ├── read-only local chat indexes
+                            └── explicit idle-session wake over Unix socket
 ```
 
 Room identity derives from the normalized Git remote when present plus the resolved Git common directory. That makes linked worktrees converge without making unrelated clones or projects collide.
@@ -100,7 +123,7 @@ The public landing/demo site lives in `app/`. The distributable Codex plugin is 
 
 ## Security
 
-The HTTP UI binds only to loopback, uses an unguessable per-process write token, sends no CORS headers, and stores state locally. A conservative pattern filter rejects common private keys and API-token shapes before persistence. This is defense in depth, not a general-purpose secret scanner; do not post secrets.
+The HTTP UI binds only to loopback, accepts only `localhost` hostnames, uses an unguessable per-process same-origin write cookie, sends no CORS headers, and stores room state locally. A conservative pattern filter rejects common private keys and API-token shapes before persistence. Local CLI histories require that write cookie even for read access. This is defense in depth, not a general-purpose secret scanner; do not post secrets.
 
 See [SECURITY.md](SECURITY.md) for reporting.
 

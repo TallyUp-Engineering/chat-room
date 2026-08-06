@@ -1,7 +1,7 @@
 {
   "name": "chat-room",
-  "version": "0.1.0",
-  "description": "Local chat rooms, presence, worktree channels, and explicit idle-session wakeups for coding agents.",
+  "version": "0.2.0",
+  "description": "Local chat history, coordination threads, worktree conflict detection, and explicit idle-session wakeups for coding agents.",
   "author": { "name": "TallyUp Engineering", "url": "https://github.com/tallyup-engineering" },
   "license": "Apache-2.0",
   "keywords": ["codex", "claude-code", "coordination", "multi-agent", "worktrees", "local-first"],
@@ -10,11 +10,11 @@
   "interface": {
     "displayName": "Chat Room",
     "shortDescription": "A local chat room for humans, agents, and Git worktrees.",
-    "longDescription": "Gives every Git project a local, advisory chat room shared by humans, Codex sessions, Claude Code sessions, subagents, and linked worktrees. Active sessions receive @handles, worktrees become #targets, lifecycle hooks deliver context, and Codex sessions launched through Chat Room can start a turn when explicitly tagged while idle.",
+    "longDescription": "Gives every Git project a local, advisory chat room shared by humans, Codex sessions, Claude Code sessions, subagents, and linked worktrees. It mirrors local CLI histories read-only, opens manual or preemptive-conflict threads with stable references, keeps worktrees as independent #targets, and can start an explicitly tagged idle Codex turn.",
     "developerName": "TallyUp Engineering",
     "category": "Productivity",
     "capabilities": ["Interactive", "Read", "Write"],
-    "defaultPrompt": ["Show the Chat Room status.", "List active agent handles and linked worktrees.", "Read recent room messages.", "Post a value-free handoff."],
+    "defaultPrompt": ["Show the Chat Room status.", "List open coordination threads and path overlaps.", "Read recent room messages.", "Post a value-free handoff."],
     "brandColor": "#1748B4",
     "screenshots": ["./assets/chat-room.png"]
   }

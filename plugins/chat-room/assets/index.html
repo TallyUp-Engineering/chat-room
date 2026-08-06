@@ -7,17 +7,47 @@
 <body>
   <main class="window">
     <header class="title"><span>Chat Room — <b id="room-title">connecting…</b></span><span class="controls">—　□　×</span></header>
-    <nav class="menu">Room　 People　 Actions　 Help</nav>
-    <div class="layout">
+    <nav class="menu"><span>Room　 People　 Actions　 Help</span><button id="toggle-sidebar" type="button">Hide sidebar</button></nav>
+    <div id="layout" class="layout">
       <aside class="rooms">
-        <h2>Conversations</h2>
-        <button class="conversation active" data-conversation="combined"><span class="conversation-icon">◎</span><span><b>Combined Chat Room</b><small>Every active interface</small></span><em id="combined-count">0</em></button>
-        <div class="room-hint">Select a chat below to add its <b>@tag</b> to the combined room.</div>
-        <div id="interfaces" aria-label="Chats grouped by interface"></div>
-        <h2>Worktrees</h2><div id="worktrees"></div>
+        <details class="nav-section" open>
+          <summary><span>Chat Room</span><em id="combined-count">0</em></summary>
+          <button id="combined-room" class="conversation active"><span class="conversation-icon">◎</span><span><b>All activity</b><small>Combined room · read</small></span></button>
+        </details>
+
+        <details class="nav-section">
+          <summary><span>Threads</span><em id="thread-count">0</em></summary>
+          <div id="threads"></div>
+          <button id="new-thread" class="new-thread" type="button">＋ Open coordination thread</button>
+          <form id="thread-form" class="thread-form" hidden>
+            <input id="thread-title" maxlength="120" required placeholder="What needs coordination?">
+            <select id="thread-reason"><option>design direction</option><option>preemptive conflict</option><option>review</option><option>handoff</option><option>blocker</option><option>other coordination</option></select>
+            <input id="thread-participants" placeholder="@actor #worktree">
+            <input id="thread-paths" placeholder="optional/path another/path">
+            <span><button type="submit">Open</button><button id="cancel-thread" type="button">Cancel</button></span>
+          </form>
+        </details>
+
+        <details class="nav-section" open>
+          <summary><span>Chats</span><em id="chat-count">0</em></summary>
+          <input id="chat-filter" class="chat-filter" type="search" placeholder="Filter local chats…" aria-label="Filter local chats">
+          <div id="chats"><p class="nav-empty">Loading local histories…</p></div>
+        </details>
+
+        <details class="nav-section">
+          <summary><span>Worktrees</span><em id="worktree-count">0</em></summary>
+          <div id="worktrees"></div>
+          <p class="room-hint">Worktrees are taggable targets, not chat histories.</p>
+        </details>
+
         <p class="authority"><b>Room ≠ authority.</b><br>Git and provider state remain authoritative.</p>
       </aside>
-      <section class="chat"><header><div><b>Combined Chat Room</b><small id="identity">local Git project · all interfaces</small></div><span class="connected">● connected locally</span></header><div id="messages" class="messages"><p class="notice">Room data stays on this machine. Secret-shaped posts are rejected before write.</p></div><p id="error" class="error" hidden></p><form id="composer"><div class="tools"><b>B</b>　<i>I</i>　 @　 #　 <span>message as @human · tagging is built in</span></div><div class="compose"><textarea id="message" maxlength="4000" placeholder="Message the combined room. Tag an active @agent or #worktree."></textarea><button>Send</button></div></form></section>
+      <section id="chat-pane" class="chat">
+        <header><div><b id="view-title">All activity</b><small id="identity">local Git project · combined room</small></div><div class="view-actions"><button id="close-thread" type="button" hidden>Resolve</button><span id="view-status" class="connected">● connected locally</span></div></header>
+        <div id="messages" class="messages"><p class="notice">Room data stays on this machine. Local chat histories are indexed read-only and never copied into the room database.</p></div>
+        <p id="error" class="error" hidden></p>
+        <form id="composer"><div class="tools"><b>B</b>　<i>I</i>　 @　 #　 <span id="compose-label">message as @human · ad hoc tagging is built in</span></div><div class="compose"><textarea id="message" maxlength="4000" placeholder="Message the combined room. Tag an active @actor or #worktree."></textarea><button>Send</button></div></form>
+      </section>
       <aside class="buddies"><div class="self"><span>H</span><div><b>@human</b><small>local operator</small></div></div><select><option>Available</option><option>Heads down</option><option>Away</option></select><div id="members"></div></aside>
       <footer><span id="authority">advisory-only</span><span id="counts">0 messages • 0 active</span></footer>
     </div>

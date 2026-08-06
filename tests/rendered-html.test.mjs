@@ -16,7 +16,7 @@ test("renders the Chat Room product and safety boundary", async () => {
   assert.match(html, /The chat room for your/);
   assert.match(html, /Room ≠ authority/);
   assert.match(html, /Secret-shaped messages are rejected/);
-  assert.match(html, /Combined Chat Room/);
-  assert.match(html, /Every active interface/);
+  assert.match(html, /All activity/);
+  assert.match(html, /Combined room/);
   assert.match(html, /tallyup-engineering\/chat-room/);
 });

@@ -24,11 +24,13 @@ const buddyGroups = [
   { label: "Offline — 1", state: "offline", people: [["@docs-agent", "last seen 14m"]] },
 ];
 
-const interfaceGroups = [
-  { label: "Codex", sessions: [["@project-manager", "#release-train · active", "online"], ["@ui-agent", "#room-interface · active", "online"], ["@api-agent", "#auth-fix · idle", "idle"]] },
-  { label: "CLI", sessions: [["@human", "local terminal · active", "online"]] },
-  { label: "Claude", sessions: [["@docs-agent", "#documentation · offline", "offline"]] },
+const localChatGroups = [
+  { label: "Codex", chats: [["Repair the release pipeline", "tallyup · Today"], ["Design the room navigation", "chat-room · Today"], ["Reconcile provider evidence", "tallyup · Yesterday"]] },
+  { label: "Claude", chats: [["Reference contract cleanup", "tallyup · Today"], ["Review the public release", "chat-room · Yesterday"]] },
 ];
+
+const coordinationThreads = [["Potential conflict: app/ui.tsx", "2 worktrees · 3 actors"], ["Choose navigation direction", "design direction · @human"]];
+const worktreeTargets = ["#release-train", "#room-interface", "#auth-fix"];
 
 function highlight(value: string) {
   const pieces = value.split(/(@[a-z0-9-]+|#[a-z0-9-]+)/gi);
@@ -36,7 +38,8 @@ function highlight(value: string) {
 }
 
 export function ChatRoom() {
-  const [room, setRoom] = useState("Combined Chat Room");
+  const [room, setRoom] = useState("All activity");
+  const [viewKind, setViewKind] = useState<"room" | "thread" | "history">("room");
   const [messages, setMessages] = useState(initialMessages);
   const [draft, setDraft] = useState("");
   const [away, setAway] = useState("Available");
@@ -74,25 +77,22 @@ export function ChatRoom() {
           <div className="menu-bar"><span>Room</span><span>People</span><span>Actions</span><span>Help</span></div>
           <div className="room-layout">
             <aside className="rail">
-              <div className="panel-label">Conversations</div>
-              <button className={`room-item combined ${room === "Combined Chat Room" ? "active" : ""}`} onClick={() => setRoom("Combined Chat Room")}><span className="combined-icon">◎</span><span><strong>Combined Chat Room</strong><small>Every active interface</small></span><b>{unread}</b></button>
-              <div className="rail-hint">Select a chat below to add its <strong>@tag</strong> to the combined room.</div>
-              {interfaceGroups.map((group) => <div className="interface-group" key={group.label}><div className="interface-title"><span>⌄ {group.label}</span><b>{group.sessions.length}</b></div>{group.sessions.map(([name, detail, state]) => <button className={`room-item session ${room === name ? "selected" : ""}`} key={`${group.label}-${name}`} onClick={() => { setRoom(name); setDraft(`${name} `); }}><span className={`presence-dot ${state}`}/><span><strong>{name}</strong><small>{detail}</small></span></button>)}</div>)}
-              <div className="adapter-note">Any MCP or hook adapter appears here automatically.</div>
+              <details className="nav-section" open><summary><span>Chat Room</span><b>{unread}</b></summary><button className={`room-item combined ${viewKind === "room" ? "active" : ""}`} onClick={() => { setRoom("All activity"); setViewKind("room"); }}><span className="combined-icon">◎</span><span><strong>All activity</strong><small>Combined room · read</small></span></button>{coordinationThreads.map(([title, detail]) => <button className={`room-item thread-item ${room === title ? "selected" : ""}`} key={title} onClick={() => { setRoom(title); setViewKind("thread"); }}><span className="thread-icon">↔</span><span><strong>{title}</strong><small>{detail}</small></span></button>)}<button className="add-interface" type="button">＋ Open coordination thread</button></details>
+              <details className="nav-section" open><summary><span>Chats</span><b>5</b></summary>{localChatGroups.map((group) => <div className="interface-group" key={group.label}><div className="interface-title"><span>{group.label}</span><b>{group.chats.length}</b></div>{group.chats.map(([name, detail]) => <button className={`room-item session ${room === name ? "selected" : ""}`} key={`${group.label}-${name}`} onClick={() => { setRoom(name); setViewKind("history"); }}><span className="history-icon">{group.label[0]}</span><span><strong>{name}</strong><small>{detail}</small></span></button>)}</div>)}</details>
+              <details className="nav-section"><summary><span>Worktrees</span><b>{worktreeTargets.length}</b></summary>{worktreeTargets.map((target) => <button className="room-item session" key={target} onClick={() => setDraft(`${target} `)}><span>#</span><span><strong>{target}</strong><small>tagging target, not a chat</small></span></button>)}</details>
               <div className="rail-note"><strong>Room ≠ authority.</strong><br/>Messages coordinate intent. Repository and provider state decide what is true.</div>
             </aside>
 
             <section className="chat-pane">
-              <div className="chat-heading"><div><strong>{room}</strong><small>{room === "Combined Chat Room" ? "All interfaces, one project, every linked worktree" : "Tagged session inside the combined room"}</small></div><div className="room-status"><span className="status-dot"/> connected locally</div></div>
+              <div className="chat-heading"><div><strong>{room}</strong><small>{viewKind === "history" ? "Local read-only CLI history" : viewKind === "thread" ? "Central reference routes to every participant" : "Combined room · every activity shown as read"}</small></div><div className="room-status"><span className="status-dot"/> {viewKind === "history" ? "indexed locally" : "connected locally"}</div></div>
               <div className="transcript" aria-live="polite">
-                <div className="system-message">Room state is stored locally in SQLite. Secret-shaped messages are rejected before write.</div>
+                <div className="system-message">{viewKind === "history" ? "Read-only local history. Tool calls, hidden instructions, and reasoning are omitted." : "Room state is stored locally in SQLite. Secret-shaped messages are rejected before write."}</div>
                 {messages.map((message) => <div className="message-row" key={message.id}><div className="message-meta"><strong>{message.sender}</strong>{message.time}</div><div className="message-body"><span className="kind">{message.kind}</span>{highlight(message.body)}</div></div>)}
               </div>
-              <div className="typing">{selectedBuddy === "@api-agent" ? "@api-agent is idle — your tag will wake the session" : `${selectedBuddy} is available`}</div>
-              <form className="composer" onSubmit={send}>
+              {viewKind !== "history" ? <><div className="typing">{selectedBuddy === "@api-agent" ? "@api-agent is idle — your tag will wake the session" : `${selectedBuddy} is available`}</div><form className="composer" onSubmit={send}>
                 <div className="composer-tools"><button type="button"><b>B</b></button><button type="button"><i>I</i></button><button type="button">@</button><button type="button">#</button><span>message as @human · tagging is built in</span></div>
                 <div className="compose-row"><textarea aria-label="Message" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Message the combined room. Try “@api-agent status?”" /><button className="send-button" type="submit">Send</button></div>
-              </form>
+              </form></> : null}
             </section>
 
             <aside className="buddy-panel">
