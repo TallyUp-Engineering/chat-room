@@ -128,6 +128,11 @@ def resolve_repository(cwd_value: Optional[str]) -> Optional[Repository]:
     except RoomError:
         return None
     remote = run_git(worktree, "remote", "get-url", "origin", check=False)
+    if not remote:
+        for remote_name in run_git(worktree, "remote", check=False).splitlines():
+            remote = run_git(worktree, "remote", "get-url", remote_name, check=False)
+            if remote:
+                break
     normalized = normalize_remote(remote)
     if normalized:
         identity = f"git:{normalized[0]}/{normalized[1]}"

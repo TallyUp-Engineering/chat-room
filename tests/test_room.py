@@ -23,6 +23,23 @@ class RoomTests(unittest.TestCase):
         self.assertEqual(room.normalize_remote("git@github.com:acme/project.git"), ("github.com", "acme/project"))
         self.assertEqual(room.normalize_remote("https://code.example.test/acme/project.git"), ("code.example.test", "acme/project"))
 
+    def test_repository_uses_first_remote_when_origin_is_absent(self):
+        def fake_git(_cwd, *args, **_kwargs):
+            values = {
+                ("rev-parse", "--show-toplevel"): "/project",
+                ("rev-parse", "--path-format=absolute", "--git-common-dir"): "/project/.git",
+                ("remote", "get-url", "origin"): "",
+                ("remote",): "upstream",
+                ("remote", "get-url", "upstream"): "git@code.example.test:acme/project.git",
+                ("branch", "--show-current"): "main",
+                ("rev-parse", "HEAD"): "a" * 40,
+            }
+            return values[args]
+        with mock.patch.object(room, "run_git", side_effect=fake_git):
+            repo = room.resolve_repository("/project")
+        self.assertIsNotNone(repo)
+        self.assertEqual(repo.project_identity, "git:code.example.test/acme/project")
+
     def test_value_free_filter(self):
         with self.assertRaises(room.RoomError): room.ensure_value_free("access_token=abcdefghijklmnopqrstuvwxyz")
         self.assertEqual(room.ensure_value_free("provider observation pending"), "provider observation pending")
