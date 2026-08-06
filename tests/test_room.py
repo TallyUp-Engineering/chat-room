@@ -99,6 +99,7 @@ class RoomTests(unittest.TestCase):
         self.assertIn('value="all"', html)
         self.assertIn('value="tag"', html)
         self.assertIn("renderRouting", script)
+        self.assertIn('#room-routing[hidden]', (assets / "room.css").read_text())
         self.assertNotIn("setInterval(refreshRoom", script)
 
     def test_terminal_chat_registers_and_releases_cli_presence(self):
@@ -228,6 +229,15 @@ class RoomTests(unittest.TestCase):
         state = room.chat_delivery_state(summary, active)
         self.assertFalse(state["ready"])
         self.assertEqual(state["mode"], "active-unattached")
+
+    def test_cli_discovery_survives_a_minimal_service_path(self):
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(room.shutil, "which", return_value=None), mock.patch.object(room.Path, "home", return_value=Path(temp)):
+            executable = Path(temp) / ".local" / "bin" / "codex"
+            executable.parent.mkdir(parents=True)
+            executable.write_text("#!/bin/sh\n")
+            executable.chmod(0o755)
+            self.assertEqual(room.find_cli_executable("codex"), str(executable))
+        self.assertIn("/opt/homebrew/bin", room.service_path().split(os.pathsep))
 
     def test_chat_delivery_passes_prompt_on_stdin_not_process_arguments(self):
         repo = self.repo()

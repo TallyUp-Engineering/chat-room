@@ -70,7 +70,8 @@ button, textarea, select { font: inherit; }
   overflow-y: auto;
   background: linear-gradient(90deg, #edf3ff, #dce8ff);
 }
-.rooms { border-right: 1px solid var(--line); }
+.rooms { min-width: 0; overflow-x: hidden; border-right: 1px solid var(--line); }
+.rooms > *, .rooms .nav-section, .rooms #threads, .rooms #chats { min-width: 0; max-width: 100%; }
 .buddies { border-left: 1px solid var(--line); }
 h2 {
   margin: 8px 7px 5px;
@@ -216,12 +217,12 @@ h2 {
 .alert-copy small { margin-top: 2px; color: #746b4e; font-size: 7px; }
 .rooms .alert-item button { width: auto; padding: 4px 5px; border: 1px solid #bba75f; background: #fff; color: #6c580b; font-size: 7px; }
 .nav-empty { margin: 5px 10px; color: #77829a; font-size: 8px; font-style: italic; }
-.chat-controls { margin: 3px 4px 7px; display: grid; grid-template-columns: 1fr auto; gap: 4px; }
+.chat-controls { min-width: 0; margin: 3px 4px 7px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px; }
 .chat-filter { grid-column: 1 / -1; width: 100%; padding: 7px 8px; border: 1px solid #91a4c8; border-radius: 4px; background: #fff; color: #26385e; font-size: 9px; outline: none; }
 .chat-filter:focus { box-shadow: 0 0 0 2px #bfd1f4; }
 .chat-controls select { min-width: 0; padding: 4px; border: 1px solid #91a4c8; border-radius: 3px; background: #fff; color: #4c5c78; font-size: 8px; }
 .rooms .chat-controls button { width: auto; justify-content: center; padding: 4px 7px; border: 1px solid #91a4c8; background: #edf3ff; color: #405781; font-size: 8px; }
-.history-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 3px; }
+.history-row { width: 100%; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 3px; }
 .history-row .history-item { min-width: 0; }
 .rooms .history-row .history-action { width: auto; padding: 4px 5px; border: 1px solid #a8b8d5; background: #fff; color: #536481; font-size: 7px; }
 .activity-badge { margin-left: auto; padding: 1px 4px; border-radius: 7px; background: #dce7fb; color: #385582; font-size: 7px; font-weight: 700; text-transform: uppercase; }
@@ -304,6 +305,7 @@ h2 {
 #composer { position: sticky; bottom: 0; z-index: 2; box-shadow: 0 -7px 14px #20345d12; }
 .tools span { color: #61708c; font: 9px Tahoma, sans-serif; }
 .tools #room-routing { display: inline-flex; gap: 4px; }
+.tools #room-routing[hidden] { display: none; }
 .tools select { max-width: 145px; padding: 2px 4px; border: 1px solid #91a4c8; border-radius: 3px; background: #fff; color: #26385e; font-size: 8px; }
 .tools button { margin: 0 4px; padding: 1px 5px; border: 1px solid #a7b6d1; border-radius: 3px; background: #fff; color: #38517f; cursor: pointer; }
 .tools button:disabled { cursor: not-allowed; opacity: .45; }

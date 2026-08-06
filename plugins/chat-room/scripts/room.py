@@ -35,7 +35,7 @@ from urllib.request import Request, urlopen
 
 
 PLUGIN_NAME = "chat-room"
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 SCHEMA_VERSION = 4
 ACTIVE_WINDOW_SECONDS = 30 * 60
 WAKE_ENDPOINT_ENV = "CHAT_ROOM_WAKE_ENDPOINT"
@@ -483,6 +483,18 @@ def client_name() -> str:
     return value if value in ("codex", "claude", "human") else "agent"
 
 
+def find_cli_executable(name: str) -> Optional[str]:
+    found = shutil.which(name)
+    if found:
+        return found
+    candidates = (
+        Path.home() / ".local" / "bin" / name,
+        Path("/opt/homebrew/bin") / name,
+        Path("/usr/local/bin") / name,
+    )
+    return next((str(path) for path in candidates if path.is_file() and os.access(path, os.X_OK)), None)
+
+
 def endpoint_socket_path(endpoint: str) -> Path:
     if not endpoint.startswith("unix:///"):
         raise RoomError("wake endpoint must be an absolute local Unix socket")
@@ -592,7 +604,7 @@ def chat_delivery_state(summary: Dict[str, Any], members: Sequence[Dict[str, Any
         if client == "codex" and member.get("last_event") == "Stop" and endpoint and socket_ready(endpoint):
             return {"ready": True, "mode": "live", "label": "Send to live Codex", "detail": "Uses the selected CLI session's local app-server connection."}
         return {"ready": False, "mode": "active-unattached", "label": "Open in CLI", "detail": "This session is active but has no safe browser delivery adapter. Codex sessions launched with chat-room codex are writable here while idle."}
-    executable = shutil.which("codex" if client == "codex" else "claude" if client == "claude" else "")
+    executable = find_cli_executable("codex" if client == "codex" else "claude" if client == "claude" else "")
     if executable:
         return {"ready": True, "mode": "resume", "label": f"Continue in {summary['client']}", "detail": "Starts one local CLI turn in this stored session; normal CLI configuration and sandbox rules still apply."}
     return {"ready": False, "mode": "unavailable", "label": "History only", "detail": f"The {summary.get('client') or 'vendor'} CLI is not installed on this machine."}
@@ -660,7 +672,7 @@ def start_chat_delivery(data_dir: Path, repo: Repository, client: str, session_i
         threading.Timer(300, cleanup_chat_images, args=(images,)).start()
         return {"status": "sent", "mode": "live", "session_id": session_id}
     normalized = str(summary["client"]).lower()
-    executable = shutil.which("codex" if normalized == "codex" else "claude" if normalized == "claude" else "")
+    executable = find_cli_executable("codex" if normalized == "codex" else "claude" if normalized == "claude" else "")
     if not executable:
         cleanup_chat_images(images)
         raise RoomError(f"{summary['client']} CLI is not installed")
@@ -1333,6 +1345,12 @@ def service_plist_path() -> Path:
     return Path.home() / "Library" / "LaunchAgents" / "com.accountable.chat-room.plist"
 
 
+def service_path() -> str:
+    preferred = [str(Path(sys.executable).resolve().parent), str(Path.home() / ".local" / "bin"), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+    preferred.extend(part for part in os.environ.get("PATH", "").split(os.pathsep) if part)
+    return os.pathsep.join(dict.fromkeys(preferred))
+
+
 def install_service(data_dir: Path, cwd: Optional[str], hostname: str, port: int, events_port: Optional[int]) -> Dict[str, Any]:
     if sys.platform != "darwin":
         raise RoomError("the durable user service currently supports macOS launchd")
@@ -1347,6 +1365,7 @@ def install_service(data_dir: Path, cwd: Optional[str], hostname: str, port: int
     payload = {
         "Label": "com.accountable.chat-room",
         "ProgramArguments": [sys.executable, str(Path(__file__).resolve()), "--data-dir", str(data_dir), "ui", "--cwd", str(repo.worktree), "--host", "127.0.0.1", "--port", str(port), "--events-port", str(events_port or (port + 1)), "--hostname", hostname, "--no-open"],
+        "EnvironmentVariables": {"PATH": service_path()},
         "RunAtLoad": True, "KeepAlive": True,
         "StandardOutPath": str(data_dir / "service.log"), "StandardErrorPath": str(data_dir / "service.log"),
         "ProcessType": "Interactive",
@@ -1377,7 +1396,7 @@ def uninstall_service() -> Dict[str, Any]:
 
 
 def run_codex(data_dir: Path, arguments: Sequence[str]) -> int:
-    executable = shutil.which("codex")
+    executable = find_cli_executable("codex")
     if not executable: raise RoomError("codex executable is not available")
     sockets = data_dir / "codex-sessions"; sockets.mkdir(parents=True, exist_ok=True)
     endpoint = f"unix://{sockets / (str(os.getpid()) + '-' + os.urandom(5).hex() + '.sock')}"
