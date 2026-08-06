@@ -89,6 +89,12 @@ function buddy(member) {
   return `<button class="buddy" data-target="${esc(member.target)}"><span class="dot ${state}"></span><div><b>${esc(member.target)}</b><small>${esc(member.worktree_target)} · ${esc(member.role)}</small></div>${member.wakeable_idle ? '<span class="wake">WAKE</span>' : ''}</button>`;
 }
 
+function setStatus(label, tone) {
+  const node = document.querySelector("#view-status");
+  node.textContent = `● ${label}`;
+  node.className = tone;
+}
+
 function resetMessages(notice) {
   const messages = document.querySelector("#messages");
   messages.innerHTML = `<p class="${currentView.kind === 'history' ? 'history-notice' : 'notice'}">${esc(notice)}</p>`;
@@ -234,7 +240,7 @@ function renderRoomView() {
     document.querySelector("#chat-pane").classList.remove("history-mode");
     document.querySelector("#view-title").textContent = "Room Log";
     document.querySelector("#identity").textContent = `${roomData.status.project_identity} · opened deliberately`;
-    document.querySelector("#view-status").textContent = "● read-only log";
+    setStatus("read-only log", "status-idle");
     document.querySelector("#close-thread").hidden = true;
     document.querySelector("#rename-view").hidden = true;
     document.querySelector("#composer").hidden = true;
@@ -249,7 +255,7 @@ function renderRoomView() {
   const agentOnly = activeThread?.audience === "agents";
   document.querySelector("#view-title").textContent = activeThread?.title || "Command Console";
   document.querySelector("#identity").textContent = activeThread ? `${activeThread.audience === 'human-loop' ? 'human in the loop' : 'agent-only chatter'} · ${activeThread.reason} · ${activeThread.id}` : `${roomData.status.project_identity} · choose an action`;
-  document.querySelector("#view-status").textContent = activeThread ? "● connected locally" : "● ready";
+  if (activeThread) setStatus("connected locally", "connected"); else setStatus("ready", "status-live");
   document.querySelector("#close-thread").hidden = !activeThread;
   document.querySelector("#close-thread").textContent = activeThread?.lifetime === "temporary" ? "Resolve" : "Archive";
   document.querySelector("#rename-view").hidden = false;
@@ -317,7 +323,7 @@ function openInactivePanel() {
   document.querySelector("#chat-pane").classList.add("history-mode");
   document.querySelector("#view-title").textContent = `Inactive chats — ${inactive.length}`;
   document.querySelector("#identity").textContent = "No live session and no activity for at least 30 days";
-  document.querySelector("#view-status").textContent = "● review queue";
+  setStatus("review queue", "status-idle");
   document.querySelector("#close-thread").hidden = true;
   document.querySelector("#rename-view").hidden = true;
   document.querySelector("#combined-room").classList.remove("active");
@@ -357,7 +363,10 @@ function renderHistory(data) {
   document.querySelector("#chat-pane").classList.add("history-mode");
   document.querySelector("#view-title").textContent = data.chat.title;
   document.querySelector("#identity").textContent = `${data.chat.client} · ${data.chat.worktree} · ${data.delivery.label}`;
-  document.querySelector("#view-status").textContent = data.delivery.mode === "running" ? "● responding" : data.delivery.mode === "active-unattached" ? "● active elsewhere" : data.delivery.ready ? "● ready" : "● view only";
+  if (data.delivery.mode === "running") setStatus("responding", "status-busy");
+  else if (data.delivery.mode === "active-unattached") setStatus("active elsewhere", "status-busy");
+  else if (data.delivery.ready) setStatus("ready", "connected");
+  else setStatus("view only", "status-idle");
   document.querySelector("#close-thread").hidden = true;
   document.querySelector("#rename-view").hidden = false;
   document.querySelector("#combined-room").classList.remove("active");
