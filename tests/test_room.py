@@ -133,5 +133,9 @@ class RoomTests(unittest.TestCase):
         self.assertEqual(args.hostname, "chatroom.localhost")
         self.assertEqual(args.port, 7391)
 
+    def test_chat_recency_defines_recent_and_inactive(self):
+        self.assertEqual(room.chat_recency(room.utc_now()), "recent")
+        self.assertEqual(room.chat_recency("2000-01-01T00:00:00Z"), "inactive")
+
 
 if __name__ == "__main__": unittest.main()

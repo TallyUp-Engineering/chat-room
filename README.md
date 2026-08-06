@@ -14,6 +14,7 @@ Built in public by [TallyUp Engineering](https://github.com/tallyup-engineering)
 - Active `@agent` handles and independent `#worktree` targets.
 - Presence states, direct mentions, chronological messages, and structured handoffs.
 - A combined room pinned above read-only local Codex and Claude chat histories, with worktrees kept as a separate collapsible target index.
+- Live/recent/stale/inactive chat status, filtering, and a non-destructive inactive review queue.
 - Manual coordination threads for design direction, review, handoff, and blockers.
 - Automatic advisory threads when multiple worktrees currently modify the same path.
 - A loopback-only web UI and a normal terminal chat client.
@@ -94,6 +95,8 @@ chat-room post --kind request --topic cleanup \
 Copy and path-adjust [`examples/claude-settings.json`](examples/claude-settings.json) into the appropriate Claude Code settings scope. It labels those sessions as Claude while preserving the same project room and message format.
 
 Existing Codex and Claude transcripts are indexed directly from their local session stores and displayed read-only. Only user and assistant text is rendered; tool calls, hidden instructions, and reasoning are omitted. History remains in the vendor-owned files and is never imported into Chat Room’s SQLite database.
+
+Chat status is intentionally mechanical: **Live** has an observed session now, **Recent** was updated within 7 days, **Stale** is 7–29 days old without a live session, and **Inactive** is at least 30 days old without one. The inactive panel is a review queue; Chat Room does not delete vendor-owned histories.
 
 ## Architecture
 

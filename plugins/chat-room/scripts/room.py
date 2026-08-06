@@ -199,6 +199,19 @@ def iso_from_mtime(path: Path) -> str:
     return datetime.fromtimestamp(value, timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def chat_recency(updated_at: str) -> str:
+    try:
+        updated = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+        age_days = max(0.0, (datetime.now(timezone.utc) - updated).total_seconds() / 86400)
+    except (TypeError, ValueError):
+        return "inactive"
+    if age_days < 7:
+        return "recent"
+    if age_days < 30:
+        return "stale"
+    return "inactive"
+
+
 def discover_chat_catalog(repo: Repository, force: bool = False) -> Tuple[List[Dict[str, Any]], Dict[Tuple[str, str], Path]]:
     now = time.monotonic()
     with CHAT_CATALOG_LOCK:
@@ -226,10 +239,11 @@ def discover_chat_catalog(repo: Repository, force: bool = False) -> Tuple[List[D
         if not session_id or not path_belongs_to_room(cwd, repo, path_cache):
             continue
         indexed = codex_titles.get(session_id, {})
+        updated = str(indexed.get("updated_at") or iso_from_mtime(path))
         summaries.append({
             "client": "Codex", "id": session_id,
             "title": concise(indexed.get("thread_name") or f"Codex chat {session_id[:8]}"),
-            "updated_at": str(indexed.get("updated_at") or iso_from_mtime(path)),
+            "updated_at": updated, "recency": chat_recency(updated),
             "worktree": Path(cwd).name or "worktree", "read_only": True,
         })
         files[("codex", session_id)] = path
@@ -256,7 +270,7 @@ def discover_chat_catalog(repo: Repository, force: bool = False) -> Tuple[List[D
         title = concise(indexed.get("display") or f"Claude chat {session_id[:8]}")
         summaries.append({
             "client": "Claude", "id": session_id, "title": title,
-            "updated_at": updated, "worktree": Path(project).name or "worktree", "read_only": True,
+            "updated_at": updated, "recency": chat_recency(updated), "worktree": Path(project).name or "worktree", "read_only": True,
         })
         files[("claude", session_id)] = path
 

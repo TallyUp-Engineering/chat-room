@@ -197,8 +197,24 @@ h2 {
 .history-mark, .thread-mark { width: 18px; height: 18px; display: grid; flex: 0 0 auto; place-items: center; border-radius: 4px; background: #d6e3fb; color: #2852a2; font-size: 8px; font-weight: 700; }
 .thread-mark { background: #fff0b3; color: #705a00; }
 .nav-empty { margin: 5px 10px; color: #77829a; font-size: 8px; font-style: italic; }
-.chat-filter { width: calc(100% - 8px); margin: 3px 4px 7px; padding: 7px 8px; border: 1px solid #91a4c8; border-radius: 4px; background: #fff; color: #26385e; font-size: 9px; outline: none; }
+.chat-controls { margin: 3px 4px 7px; display: grid; grid-template-columns: 1fr auto; gap: 4px; }
+.chat-filter { grid-column: 1 / -1; width: 100%; padding: 7px 8px; border: 1px solid #91a4c8; border-radius: 4px; background: #fff; color: #26385e; font-size: 9px; outline: none; }
 .chat-filter:focus { box-shadow: 0 0 0 2px #bfd1f4; }
+.chat-controls select { min-width: 0; padding: 4px; border: 1px solid #91a4c8; border-radius: 3px; background: #fff; color: #4c5c78; font-size: 8px; }
+.rooms .chat-controls button { width: auto; justify-content: center; padding: 4px 7px; border: 1px solid #91a4c8; background: #edf3ff; color: #405781; font-size: 8px; }
+.history-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 3px; }
+.history-row .history-item { min-width: 0; }
+.rooms .history-row .history-action { width: auto; padding: 4px 5px; border: 1px solid #a8b8d5; background: #fff; color: #536481; font-size: 7px; }
+.activity-badge { margin-left: auto; padding: 1px 4px; border-radius: 7px; background: #dce7fb; color: #385582; font-size: 7px; font-weight: 700; text-transform: uppercase; }
+.activity-badge.live { background: #c9f1d8; color: #206840; }
+.activity-badge.recent { background: #dce7fb; color: #385582; }
+.activity-badge.stale { background: #fff0b3; color: #705a00; }
+.activity-badge.inactive { background: #e1e3e8; color: #5e6572; }
+.inactive-card { margin: 7px 14px; padding: 9px 11px; display: flex; align-items: center; gap: 9px; border: 1px solid #c4cde1; border-radius: 5px; background: #f7f9fd; }
+.inactive-card > div { min-width: 0; flex: 1; }
+.inactive-card b, .inactive-card small { display: block; }
+.inactive-card small { margin-top: 3px; color: #6b7690; font-size: 9px; }
+.inactive-card button { padding: 5px 8px; border: 1px solid #8da1c5; border-radius: 3px; background: #fff; color: #405781; font-size: 8px; cursor: pointer; }
 .rooms button.new-thread { margin: 4px 0; justify-content: center; border: 1px dashed #91a8d1; color: #516889; font-size: 8px; }
 .thread-form { margin: 5px 2px 10px; padding: 7px; border: 1px solid #aebfe0; border-radius: 4px; background: #ffffff99; }
 .thread-form input, .thread-form select { width: 100%; margin-bottom: 5px; padding: 5px; border: 1px solid #91a4c8; border-radius: 3px; background: #fff; color: #26385e; font-size: 8px; }

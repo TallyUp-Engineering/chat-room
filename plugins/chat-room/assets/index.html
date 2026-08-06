@@ -30,7 +30,7 @@
 
         <details class="nav-section" open>
           <summary><span>Chats</span><em id="chat-count">0</em></summary>
-          <input id="chat-filter" class="chat-filter" type="search" placeholder="Filter local chats…" aria-label="Filter local chats">
+          <div class="chat-controls"><input id="chat-filter" class="chat-filter" type="search" placeholder="Filter local chats…" aria-label="Filter local chats"><select id="chat-status-filter" aria-label="Filter by activity status"><option value="all">All statuses</option><option value="live">Live</option><option value="recent">Recent</option><option value="stale">Stale</option><option value="inactive">Inactive</option></select><button id="list-inactive" type="button">List inactive</button></div>
           <div id="chats"><p class="nav-empty">Loading local histories…</p></div>
         </details>
 

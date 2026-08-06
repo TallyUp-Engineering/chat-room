@@ -110,15 +110,38 @@ function openThread(threadId) {
 function renderCatalog(data) {
   catalogData = data;
   const query = document.querySelector("#chat-filter").value.trim().toLowerCase();
-  const visibleChats = query ? data.chats.filter(chat => `${chat.client} ${chat.title} ${chat.worktree}`.toLowerCase().includes(query)) : data.chats;
+  const statusFilter = document.querySelector("#chat-status-filter").value;
+  const liveSessions = new Set((roomData?.targets?.agents || []).map(agent => agent.session_id).filter(Boolean));
+  const state = chat => liveSessions.has(chat.id) ? "live" : chat.recency;
+  const visibleChats = data.chats.filter(chat => (!query || `${chat.client} ${chat.title} ${chat.worktree}`.toLowerCase().includes(query)) && (statusFilter === "all" || state(chat) === statusFilter));
   const groups = new Map();
   for (const chat of visibleChats) {
     if (!groups.has(chat.client)) groups.set(chat.client, []);
     groups.get(chat.client).push(chat);
   }
   document.querySelector("#chat-count").textContent = query ? `${visibleChats.length}/${data.chats.length}` : data.chats.length;
-  document.querySelector("#chats").innerHTML = [...groups.entries()].map(([client, chats]) => `<section class="chat-group"><div class="chat-group-title">${esc(client)} — ${chats.length}</div>${chats.map(chat => `<button class="history-item ${currentView.kind === 'history' && currentView.id === chat.id ? 'selected' : ''}" data-client="${esc(chat.client)}" data-chat="${esc(chat.id)}"><span class="history-mark">${esc(chat.client.slice(0, 1))}</span><span><b>${esc(chat.title)}</b><small>${esc(chat.worktree)} · ${time(chat.updated_at)}</small></span></button>`).join('')}</section>`).join('') || '<p class="nav-empty">No matching local chat histories.</p>';
+  document.querySelector("#chats").innerHTML = [...groups.entries()].map(([client, chats]) => `<section class="chat-group"><div class="chat-group-title">${esc(client)} — ${chats.length}</div>${chats.map(chat => `<div class="history-row"><button class="history-item ${currentView.kind === 'history' && currentView.id === chat.id ? 'selected' : ''}" data-client="${esc(chat.client)}" data-chat="${esc(chat.id)}"><span class="history-mark">${esc(chat.client.slice(0, 1))}</span><span><b>${esc(chat.title)}</b><small>${esc(chat.worktree)} · ${time(chat.updated_at)}</small></span><em class="activity-badge ${state(chat)}">${state(chat)}</em></button><button class="history-action" data-client="${esc(chat.client)}" data-chat="${esc(chat.id)}">${state(chat) === 'inactive' || state(chat) === 'stale' ? 'Review' : 'Open'}</button></div>`).join('')}</section>`).join('') || '<p class="nav-empty">No matching local chat histories.</p>';
   document.querySelectorAll("[data-chat]").forEach(node => { node.onclick = () => openHistory(node.dataset.client, node.dataset.chat); });
+}
+
+function openInactivePanel() {
+  const liveSessions = new Set((roomData?.targets?.agents || []).map(agent => agent.session_id).filter(Boolean));
+  const inactive = catalogData.chats.filter(chat => !liveSessions.has(chat.id) && chat.recency === "inactive");
+  currentView = { kind: "inactive", id: "inactive" };
+  document.querySelector("#chat-pane").classList.add("history-mode");
+  document.querySelector("#view-title").textContent = `Inactive chats — ${inactive.length}`;
+  document.querySelector("#identity").textContent = "No live session and no activity for at least 30 days";
+  document.querySelector("#view-status").textContent = "● review queue";
+  document.querySelector("#close-thread").hidden = true;
+  document.querySelector("#combined-room").classList.remove("active");
+  const messages = resetMessages("Live means attached now. Recent means under 7 days. Stale means 7–29 days. Inactive means 30+ days without a live session. Review does not delete vendor-owned history.");
+  for (const chat of inactive) {
+    const card = document.createElement("div");
+    card.className = "inactive-card";
+    card.innerHTML = `<span class="history-mark">${esc(chat.client.slice(0, 1))}</span><div><b>${esc(chat.title)}</b><small>${esc(chat.client)} · ${esc(chat.worktree)} · ${time(chat.updated_at)}</small></div><button data-client="${esc(chat.client)}" data-chat="${esc(chat.id)}">Review</button>`;
+    messages.append(card);
+  }
+  messages.querySelectorAll("[data-chat]").forEach(node => { node.onclick = () => openHistory(node.dataset.client, node.dataset.chat); });
 }
 
 async function openHistory(client, sessionId) {
@@ -156,6 +179,8 @@ async function refreshCatalog() {
 
 document.querySelector("#combined-room").onclick = openRoom;
 document.querySelector("#chat-filter").oninput = () => renderCatalog(catalogData);
+document.querySelector("#chat-status-filter").onchange = () => renderCatalog(catalogData);
+document.querySelector("#list-inactive").onclick = openInactivePanel;
 document.querySelector("#toggle-sidebar").onclick = () => {
   const collapsed = document.querySelector("#layout").classList.toggle("sidebar-collapsed");
   document.querySelector("#toggle-sidebar").textContent = collapsed ? "Show sidebar" : "Hide sidebar";
