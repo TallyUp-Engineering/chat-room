@@ -4,10 +4,14 @@ name: Package
 # gets published is the one that was built and inspected, and a failed publish never
 # silently rebuilds from a different tree.
 #
-# Publishing needs PyPI Trusted Publishing configured once for this repository and the
-# workflow filename `package.yml`, with a GitHub environment named `pypi`. Until that
-# exists the build job still runs on every tag and the publish job is the only thing
-# that fails, which is the safe way round.
+# A release goes to TestPyPI first and is installed back from that real index before PyPI
+# sees it. Publishing to PyPI cannot be undone and yanking is deliberately manual — the
+# route requires re-authentication and exists only in the web UI — so the last chance to
+# catch a bad artifact has to come before the irreversible step, not after it.
+#
+# Needs Trusted Publishing configured once on each index for this repository and the
+# workflow filename `package.yml`, with GitHub environments named `testpypi` and `pypi`.
+# Until they exist the build job still runs on every tag and only publishing fails.
 
 on:
   push:
@@ -94,9 +98,73 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  rehearse:
+    name: publish to TestPyPI
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/chat-room
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: distributions
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          # TestPyPI is a rehearsal, not a record. A re-run of the same tag must not fail
+          # here just because the rehearsal already happened.
+          skip-existing: true
+
+  verify:
+    name: install from the index and run it
+    needs: rehearse
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      # The point of this job: nothing so far has installed the artifact from a package
+      # index. Chat Room depends on nothing outside the standard library, so TestPyPI can
+      # satisfy it alone — no fallback to PyPI, which would hide a broken upload.
+      - name: Install the published version from TestPyPI
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          python -m venv /tmp/rehearsal
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if /tmp/rehearsal/bin/pip install --disable-pip-version-check \
+                 --index-url https://test.pypi.org/simple/ "chat-room==$version"; then
+              installed=yes; break
+            fi
+            echo "not on the index yet; attempt $attempt"
+            sleep 15
+          done
+          [ "${installed:-no}" = "yes" ] || { echo "::error::chat-room $version never appeared on TestPyPI"; exit 1; }
+
+      - name: Run it, and confirm it carries its data files
+        run: |
+          /tmp/rehearsal/bin/chat-room --version
+          /tmp/rehearsal/bin/chat-room doctor
+          /tmp/rehearsal/bin/python - <<'PY'
+          import pathlib, chat_room
+          root = pathlib.Path(chat_room.__file__).parent
+          skills = sorted(p.parent.name for p in root.rglob("SKILL.md"))
+          manifests = [name for name in (".mcp.json", "hooks/hooks.json", ".codex-plugin/plugin.json") if (root / name).exists()]
+          print("skills:", skills, "manifests:", manifests)
+          assert skills, "the installed package carries no skills"
+          assert len(manifests) == 3, f"the installed package is missing manifests: {manifests}"
+          PY
+
   publish:
     name: publish to PyPI
-    needs: build
+    needs: verify
     if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
     runs-on: ubuntu-latest
     timeout-minutes: 15

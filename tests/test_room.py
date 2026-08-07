@@ -386,6 +386,8 @@ class RoomTests(unittest.TestCase):
         """A constraint nobody checks is a preference. Keep the document honest."""
         doc = (MODULE.parents[3] / "docs" / "architecture.md").read_text(encoding="utf-8")
         named = set(re.findall(r"`(test_[a-z0-9_]+)`", doc))
+        # A row may name a workflow instead, where the enforcement is the pipeline itself.
+        self.assertIn(".github/workflows/package.yml", doc)
         self.assertGreaterEqual(len(named), 10, "architecture.md lists suspiciously few constraints")
         suites = (MODULE.parents[3] / "tests")
         defined = set()
