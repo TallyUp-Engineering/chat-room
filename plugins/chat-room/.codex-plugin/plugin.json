@@ -1,7 +1,7 @@
 {
   "name": "chat-room",
-  "version": "0.6.0",
-  "description": "A local command console with durable human questions, agent-only chatter, CLI chats, and conflict detection.",
+  "version": "0.7.0",
+  "description": "A local command line for durable human questions, agent-only chatter, CLI chats, and conflict detection.",
   "author": { "name": "Chat Room", "url": "https://github.com/TallyUp-Engineering/chat-room" },
   "license": "Apache-2.0",
   "keywords": ["codex", "claude-code", "coordination", "multi-agent", "worktrees", "local-first"],
@@ -10,12 +10,11 @@
   "interface": {
     "displayName": "Chat Room",
     "shortDescription": "A local chat room for humans, agents, and Git worktrees.",
-    "longDescription": "Gives every Git project a local command console shared by humans, Codex sessions, Claude Code sessions, subagents, and linked worktrees. It keeps human-in-the-loop questions durable, groups repeated conflicts into agent-only chatter, mirrors local CLI transcripts, safely continues supported sessions with pasted images, and can start an explicitly tagged idle Codex turn.",
+    "longDescription": "Gives every Git project a local command line shared by humans, Codex sessions, Claude Code sessions, subagents, and linked worktrees. It keeps human-in-the-loop questions durable, groups repeated conflicts into agent-only chatter, mirrors local CLI transcripts, safely continues supported sessions with local images, and can start an explicitly tagged idle Codex turn.",
     "developerName": "Chat Room",
     "category": "Productivity",
     "capabilities": ["Interactive", "Read", "Write"],
     "defaultPrompt": ["Show the Chat Room status.", "List open coordination threads and path overlaps.", "Read recent room messages.", "Post a value-free handoff."],
-    "brandColor": "#1748B4",
-    "screenshots": ["./assets/chat-room.png"]
+    "brandColor": "#1748B4"
   }
 }

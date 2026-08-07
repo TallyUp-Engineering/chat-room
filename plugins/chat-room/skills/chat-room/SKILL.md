@@ -37,13 +37,12 @@ Use `room_handoff` with source revision, paths, proof, blocker, and next owner. 
 ## Human interface
 
 ```sh
-chat-room ui
 chat-room chat
 chat-room targets
 chat-room threads
+chat-room alerts
 chat-room options
 chat-room thread-open --audience human-loop --origin agent-request --title "Choose navigation direction" --reason "design direction" --participant @human --participant @ui-agent
 chat-room post --kind request --topic cleanup --message "@project-manager investigate unassigned worktrees and report unique unmerged work"
 chat-room codex
-chat-room service install --cwd .
 ```

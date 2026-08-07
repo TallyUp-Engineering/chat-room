@@ -49,31 +49,47 @@ Exposed over stdio MCP. Inputs and outputs are JSON; the message schema is `chat
 
 `room_session_start` runs a real vendor CLI session and bills vendor tokens.
 
-## Local HTTP
+## Command line
 
-`chat-room ui` exposes a loopback-only server. It binds only to loopback, accepts only
-`localhost` hostnames, sends no CORS headers, and validates the WebSocket origin. **Every
-route below requires the unguessable per-process local token**, supplied as the
-`chat_room_token` cookie set by `GET /` or an `X-Chat-Room-Token` header.
+The `chat-room` command is the whole human surface. Every subcommand prints JSON except
+`chat` and `codex`, which are interactive, and `hook`/`mcp`, which speak to a host program.
+Each accepts `--cwd` to name the worktree it acts in.
 
 | Read | Returns |
 |---|---|
-| `/api/snapshot` | Room status, recent messages, targets, threads, alerts, options. |
-| `/api/search` | Room messages matching `?q=`, across the whole history. |
-| `/api/chats` | Indexed local CLI conversations for this project. |
-| `/api/chat` | One conversation's visible transcript and delivery state. |
+| `chat-room status` | Room and repository identity. |
+| `chat-room read` | Chronological room messages from `--after-id`. |
+| `chat-room search` | Room messages, or transcripts with `--scope chats`. |
+| `chat-room members` | Observed sessions and presence. |
+| `chat-room targets` | Active `@agent` and `#worktree` targets. |
+| `chat-room threads` | Open manual and merge-conflict coordination threads. |
+| `chat-room alerts` | Shared worktrees, overlaps, decisions, and stale lanes. |
+| `chat-room chats` | Local CLI conversations discovered for this project. |
+| `chat-room ready` | Which worktree branches merge cleanly into `--into`, and which collide. |
+| `chat-room projects` | Every project with a room on this machine, worktrees grouped under it. |
+| `chat-room spend` | Token spend per worktree beside the commits it produced. |
+| `chat-room options` | Indexed notification and delivery options. |
+| `chat-room doctor` | Why the room is broken, with `--repair`. |
 
 | Write | Effect |
 |---|---|
-| `/api/messages` | Post as `@human`, or into a thread with `thread_id`. |
-| `/api/threads` | Open a chatter thread or a human-in-the-loop question. |
-| `/api/thread-close` | Resolve or archive a thread. |
-| `/api/chat-send` | Continue a local conversation through its vendor CLI. |
-| `/api/rename` | Machine-local rename overlay for a room, channel, or chat. |
-| `/api/session-start` | Start a new local agent session in a worktree. |
-| `/api/session-stop` | Interrupt a turn this room started. |
+| `chat-room post` | Post one value-free message as `--sender`. |
+| `chat-room chat` | Interactive terminal session in the room. |
+| `chat-room thread-open` | Open agent chatter or a human-in-the-loop question. |
+| `chat-room thread-close` | Resolve or archive a thread. |
+| `chat-room rename` | Machine-local rename overlay for a room, channel, or chat. |
+| `chat-room identify` | Assign an active session a semantic `@handle`. |
+| `chat-room option-set` | Add or update one machine-local indexed option. |
+| `chat-room start` | Open new agent work in a worktree of this project. |
+| `chat-room send` | Continue a stored conversation through its vendor CLI. |
+| `chat-room stop` | Interrupt a local turn this room started. |
+| `chat-room index` | Backfill the optional transcript index. |
+| `chat-room codex` | Run Codex with a wake endpoint this room can reach. |
+| `chat-room hook` | Emit coordination context to a host CLI. |
+| `chat-room mcp` | Serve the MCP tools above over stdio. |
 
-`GET /` and the static assets it references are the only unauthenticated responses.
+`chat-room start` and `chat-room send` run real vendor CLI turns and bill vendor tokens.
+`--image` on `send` references files already on this machine; they are never copied.
 
 ## Carrying tags into sessions
 

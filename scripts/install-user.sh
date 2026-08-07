@@ -9,8 +9,9 @@ SOURCE="$REPO_ROOT/plugins/chat-room/scripts/room.py"
 RUNTIME_DIR=${CHAT_ROOM_RUNTIME_DIR:-"$HOME/.local/share/chat-room/runtime"}
 
 mkdir -p "$BIN_DIR"
+# Chat Room itself needs nothing beyond the standard library. The runtime exists so the
+# optional transcript index has somewhere to land.
 python3 -m venv "$RUNTIME_DIR"
-"$RUNTIME_DIR/bin/python" -m pip install --disable-pip-version-check -r "$REPO_ROOT/requirements.txt"
 
 if [ -L "$TARGET" ]; then
   rm "$TARGET"

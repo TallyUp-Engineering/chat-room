@@ -17,9 +17,9 @@ classifiers = [
   "Programming Language :: Python :: 3",
   "Topic :: Software Development :: Version Control :: Git",
 ]
-# The browser room needs a WebSocket transport. Everything else is standard library,
-# which is what keeps `pipx install chat-room` a single fast step.
-dependencies = ["websockets==17.0.1"]
+# Nothing outside the standard library, which is what keeps `pipx install chat-room`
+# a single step that resolves no wheels at all.
+dependencies = []
 dynamic = ["version"]
 
 [project.optional-dependencies]

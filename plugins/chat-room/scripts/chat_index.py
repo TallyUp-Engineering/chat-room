@@ -97,7 +97,7 @@ class Turn(Base):
     """One user or assistant message inside a chat.
 
     Tool calls, hidden instructions, and reasoning are never indexed — the same
-    boundary the browser transcript honours.
+    boundary `chat-room chats` honours.
     """
 
     __tablename__ = "turn"

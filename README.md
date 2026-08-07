@@ -2,31 +2,30 @@
 
 **The local chat room for humans, coding agents, and every worktree in a Git project.**
 
-Chat Room gives Codex, Claude Code, subagents, and the human operator one retro desktop room to coordinate work. It is local-first, dependency-light, and deliberately advisory: chat can carry intent and evidence pointers, but it cannot claim a branch, authorize a deletion, or prove delivery.
+Chat Room gives Codex, Claude Code, subagents, and the human operator one local room to coordinate work. It is local-first, dependency-light, and deliberately advisory: chat can carry intent and evidence pointers, but it cannot claim a branch, authorize a deletion, or prove delivery.
 
 [worktree.chat](https://worktree.chat)
 
-> Chat Room uses an original late-1990s desktop messenger-inspired interface.
+## What ships in v0.7
 
-## What ships in v0.6
+**The command line is the whole interface.** The loopback web room, its WebSocket change
+signals, and the macOS launchd service that kept it running are gone. What they could do,
+`chat-room` does:
 
-The room can now **start, reach, answer, and stop** agent work, so the terminal stops being
-the only way in.
+| Removed | Use instead |
+|---|---|
+| `chat-room ui`, `chat-room service` | `chat-room chat`, or one-shot subcommands |
+| the alert wall | `chat-room alerts` |
+| the Chats panel | `chat-room chats`, `chat-room send` |
+| rename in place | `chat-room rename --kind room\|channel\|chat` |
+| pasted image attachments | `chat-room send --image ./shot.png` |
 
-- **Start new work from the room.** Choose a worktree, choose Claude or Codex, write the first
-  instruction. `chat-room start`, the `room_session_start` tool, and a card on the Command
-  Console all open one real local CLI session. It bills vendor tokens like any other session.
-- **A tag reaches an idle session.** Previously only a Codex session launched with
-  `chat-room codex` could be woken, so tagging a Claude worker did nothing. Any idle session now
-  receives the tagged message through its vendor CLI. Delivery is deliberately narrow — see
-  *Carrying tags into sessions* below.
-- **Answers find their way home.** A question opened with `session_id` records the session that
-  asked, so the reply routes back to it rather than waiting to be noticed.
-- **Stop a running turn.** The Ctrl-C you give up by not holding a terminal, as a button and as
-  `chat-room stop`.
-- **Unread, not total.** The console badge counts what arrived since you last opened the room log.
-- **Search the whole room**, not just the loaded window — `chat-room search`, `room_search`, or the
-  sidebar box.
+Chat Room now depends on nothing outside the Python standard library, so `pipx install
+chat-room` resolves no third-party wheels at all. The optional transcript index is unchanged.
+
+Everything from v0.6 still holds: `chat-room start` opens real vendor sessions, a tag reaches
+an idle session, questions route answers home, and `chat-room stop` is the Ctrl-C you give up
+by not holding a terminal.
 
 ### Carrying tags into sessions
 
@@ -92,21 +91,18 @@ directly, so an absent index costs speed and never function.
 - A primary **Command Console** for all project activity, a durable **Human in the Loop** question queue, agent-only **Chatter**, and real local Codex and Claude conversations under **Chats**.
 - The Command Console starts as a quiet activation screen. It does not render the room log or expose a composer until the human chooses a route; the full log remains one deliberate click away.
 - Live CLI transcripts with signature-stable rendering. Dormant sessions can be continued through their installed local CLI; an idle Codex session launched with `chat-room codex` accepts turns through its existing local app-server connection.
-- Paste, drop, or attach images when continuing a supported Codex or Claude conversation. Temporary image files are private and removed after delivery.
-- Machine-local rename overlays for both the project room and individual CLI chats; vendor history files remain untouched.
-- Live/recent/stale/inactive chat status, filtering, and a non-destructive inactive review queue.
+- Local images on a continued turn with `chat-room send --image`; the files are referenced where they already live and never copied.
+- Machine-local rename overlays for the project room, channels, and individual CLI chats; vendor history files remain untouched.
+- Live/recent/stale/inactive chat status from `chat-room chats`.
 - Durable human questions preserve their initiating actor and reason so answers return to the right context. Agent chatter remains separately readable and never silently recruits the human.
 - Durable team chatter and temporary coordination chatter for review, handoff, blockers, conflicts, and one focused goal.
-- One explicit composer route: the selected channel, every active worker, or one tagged worker. Broadcast coordinates through the room; it does not start duplicate CLI turns.
 - Automatic advisory chatter when multiple worktrees currently modify the same path. Repeated file overlaps with the same participant cohort collapse into one thread with every affected path.
-- Quiet, grouped chatter suggestions for shared-worktree actors and file overlaps. A small `+` deliberately activates the conversation; there is no alert-card wall.
-- Indexed actor/action routing. `investigate`, `consolidate`, and `delete after proof` are editable key/value options; routing opens a tagged chat and never mutates Git.
-- A loopback-only web UI with WebSocket change signals and bounded reconciliation, plus a normal terminal chat client.
+- Indexed actor/action routing. `investigate`, `consolidate`, and `delete after proof` are editable key/value options that never mutate Git.
 - Codex lifecycle hooks and an MCP server with fifteen room tools.
 - Claude Code hook configuration using the same local protocol.
 - Explicit idle Codex wakeups when the session was launched with `chat-room codex`.
 - SQLite state under `~/.chat-room`, mode `0600`, with credential-shape rejection.
-- No hosted account, telemetry, or project-specific dependency. The optional macOS user service is loopback-only and reversible.
+- No hosted account, telemetry, listening socket, or project-specific dependency.
 
 ## Install
 
@@ -155,36 +151,16 @@ For a Codex TUI that can be woken while idle after an explicit tag:
 chat-room codex
 ```
 
-The wake path uses Codex app server over a private Unix socket. If the app-server protocol changes, ordinary hooks, MCP tools, terminal chat, and the web room continue to work.
+The wake path uses Codex app server over a private Unix socket. If the app-server protocol changes, ordinary hooks, MCP tools, and terminal chat continue to work.
 
 ## Open the room without an agent CLI
 
 ```sh
-chat-room ui
-```
-
-This opens the full local messenger UI at the durable, bookmarkable `http://chatroom.localhost:7391/`. The server still binds only to loopback, validates the browser hostname, and uses a same-origin local write cookie.
-
-Choose a different machine-local bookmark without editing DNS or `/etc/hosts`:
-
-```sh
-chat-room ui --hostname my-team.localhost --port 7392
-```
-
-On macOS, opt into a user-level launchd service so the bookmark survives terminal and browser restarts:
-
-```sh
-chat-room service install --cwd .
-chat-room service status
-```
-
-The reversible removal command is `chat-room service uninstall`.
-
-Or stay entirely in the terminal:
-
-```sh
 chat-room chat
 ```
+
+That is the interactive client: it prints the recent log, follows new messages, and posts what
+you type. `/help` lists its slash commands.
 
 Useful one-shot commands:
 
@@ -209,7 +185,7 @@ Copy and path-adjust [`examples/claude-settings.json`](examples/claude-settings.
 
 Existing Codex and Claude transcripts are indexed directly from their local session stores. Only user and assistant text is rendered; tool calls, hidden instructions, and reasoning are omitted. History remains in the vendor-owned files and is never imported into Chat Room’s SQLite database.
 
-The browser composer continues dormant Codex or Claude sessions through the installed vendor CLI using its ordinary local configuration and sandbox rules. A session already open in another CLI fails closed unless it exposes a safe live adapter; this avoids concurrently resuming one transcript from two processes. Chat Room passes browser prompts over stdin rather than process arguments. The transcript then refreshes from the vendor-owned file.
+`chat-room send` continues dormant Codex or Claude sessions through the installed vendor CLI using its ordinary local configuration and sandbox rules. A session already open in another CLI fails closed unless it exposes a safe live adapter; this avoids concurrently resuming one transcript from two processes. Chat Room passes prompts over stdin rather than process arguments. The transcript then refreshes from the vendor-owned file.
 
 Notification choices are data, not HTML. Inspect or extend the local option index without rebuilding the interface:
 
@@ -227,8 +203,7 @@ Chat status is intentionally mechanical: **Live** has an observed session now, *
 Codex hooks ─┐
 Claude hooks ├── local Python protocol ── SQLite (one logical room per Git project)
 MCP tools ───┤              │
-Terminal UI ─┤              ├── loopback HTTP + WebSocket browser UI
-Web UI ──────┘              ├── live local chat indexes + CLI delivery adapters
+Command line ┘              ├── live local chat indexes + CLI delivery adapters
                             ├── durable team + temporary coordination channels
                             └── explicit idle-session wake over Unix socket
 ```
@@ -246,11 +221,11 @@ cd ~/chat-room
 make check
 ```
 
-The public landing/demo site lives in `app/`. The distributable Codex plugin is `plugins/chat-room/`. The user installer creates a private Python virtual environment and installs the pinned WebSocket transport dependency.
+The public landing/demo site lives in `app/`; it generates its command and tool reference from `docs/protocol.md` at build time, so a change to the CLI reaches the page without anyone editing it. The distributable Codex plugin is `plugins/chat-room/`.
 
 ## Security
 
-The HTTP and WebSocket services bind only to loopback, accept only `localhost` hostnames, use an unguessable per-process local session cookie, validate the WebSocket origin, send no CORS headers, and store room state locally. A conservative pattern filter rejects common private keys and API-token shapes before persistence. Local CLI histories require that cookie even for read access. This is defense in depth, not a general-purpose secret scanner; do not post secrets.
+Chat Room opens no listening socket. It stores room state locally under `~/.chat-room` at mode `0600`, and reaches a running Codex session only over a private Unix socket that session created. A conservative pattern filter rejects common private keys and API-token shapes before persistence. This is defense in depth, not a general-purpose secret scanner; do not post secrets.
 
 See [SECURITY.md](SECURITY.md) for reporting.
 
