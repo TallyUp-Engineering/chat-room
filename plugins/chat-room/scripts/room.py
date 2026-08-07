@@ -98,7 +98,6 @@ CHAT_DELIVERY_LOCK = threading.Lock()
 CHAT_DELIVERIES: Dict[Tuple[str, str], Dict[str, Any]] = {}
 MAX_CHAT_IMAGES = 5
 CONFLICT_SCAN_TTL_SECONDS = 30
-MAX_CONFLICT_PROBES = 40
 # House rules. One namespace decides how hard each one is, and nothing else in the room
 # decides severity — a rule names a condition the room can already observe, and its value
 # is the rung. Git's index is the model: a rule is declared intent staged against a
@@ -494,10 +493,45 @@ def branch_changed_paths(repo: Repository, target: str, branch: str) -> Set[str]
     return {line for line in output.splitlines() if line.strip()}
 
 
-def merge_conflict_paths(repo: Repository, left: str, right: str) -> Set[str]:
+def resolved_head(repo: Repository, ref: str, seen: Dict[str, str]) -> str:
+    """The commit a ref points at, asked once per ref rather than once per pair."""
+    if ref not in seen:
+        seen[ref] = run_git(repo.worktree, "rev-parse", "--verify", f"{ref}^{{commit}}", check=False).strip()
+    return seen[ref]
+
+
+def merge_memo(data_dir: Optional[Path]) -> Optional[sqlite3.Connection]:
+    """A memo of merge-tree answers, keyed on the two commits it compared.
+
+    Whether two specific commits conflict is a fixed fact, so this can never go stale and
+    needs no expiry — the key changes when either branch moves. It lives beside the room
+    rather than inside it: it is rebuildable, so it must not share a schema that several
+    versions of this program migrate.
+    """
+    if data_dir is None:
+        return None
+    try:
+        connection = sqlite3.connect(str(Path(data_dir) / "merge-cache.sqlite3"), timeout=10)
+        connection.execute("CREATE TABLE IF NOT EXISTS merge_probe(left TEXT NOT NULL,right TEXT NOT NULL,paths_json TEXT NOT NULL,PRIMARY KEY(left,right))")
+        connection.commit()
+        return connection
+    except sqlite3.Error:
+        return None
+
+
+def merge_conflict_paths(repo: Repository, left: str, right: str, memo: Optional[sqlite3.Connection] = None, heads: Optional[Dict[str, str]] = None) -> Set[str]:
     """Paths Git reports as conflicting when the two branches are merged."""
     if not left or not right or left == right:
         return set()
+    seen = heads if heads is not None else {}
+    key: Optional[Tuple[str, str]] = None
+    if memo is not None:
+        one, two = resolved_head(repo, left, seen), resolved_head(repo, right, seen)
+        if one and two:
+            key = (one, two) if one <= two else (two, one)
+            row = memo.execute("SELECT paths_json FROM merge_probe WHERE left=? AND right=?", key).fetchone()
+            if row is not None:
+                return set(json.loads(row[0]))
     try:
         result = subprocess.run(
             ["git", "-C", str(repo.worktree), "merge-tree", "--write-tree", "--name-only", left, right],
@@ -505,26 +539,37 @@ def merge_conflict_paths(repo: Repository, left: str, right: str) -> Set[str]:
         )
     except (OSError, subprocess.TimeoutExpired):
         return set()
-    if result.returncode != 1:
-        # 0 merges cleanly; anything above 1 is an unusable ref or unrelated history.
+    if result.returncode > 1:
+        # An unusable ref or unrelated history is a non-answer, so it is never memoised.
         return set()
     conflicted: Set[str] = set()
-    for line in result.stdout.splitlines()[1:]:
-        if not line.strip():
-            break
-        conflicted.add(line)
+    if result.returncode == 1:
+        for line in result.stdout.splitlines()[1:]:
+            if not line.strip():
+                break
+            conflicted.add(line)
+    # A clean result is worth remembering too — most pairs are clean, and re-proving that
+    # every run is what made a full sweep unaffordable in the first place.
+    if memo is not None and key is not None:
+        try:
+            memo.execute("INSERT OR REPLACE INTO merge_probe(left,right,paths_json) VALUES(?,?,?)", (key[0], key[1], json.dumps(sorted(conflicted))))
+            memo.commit()
+        except sqlite3.Error:
+            pass
     return conflicted
 
 
-def scan_preemptive_conflicts(repo: Repository) -> None:
+def scan_preemptive_conflicts(repo: Repository, data_dir: Optional[Path] = None) -> None:
+    memo: Optional[sqlite3.Connection] = None
     try:
         worktrees = [item for item in list_worktree_references(repo) if Path(str(item["path"])).exists()]
         dirty = {str(item["path"]): changed_worktree_paths(Path(str(item["path"]))) for item in worktrees}
-        # ponytail: separate worktrees are separate checkouts, so two of them holding the
-        # same relative path is the normal workflow, not a conflict. Shared dirty paths only
-        # nominate a pair; Git decides whether the branches actually collide. Probes are
-        # capped because the pairing is O(n^2) — raise MAX_CONFLICT_PROBES if a large project
-        # starts missing pairs, or key the cache on branch heads to skip unchanged pairs.
+        # Separate worktrees are separate checkouts, so two of them holding the same
+        # relative path is the normal workflow, not a conflict. Shared dirty paths only
+        # nominate a pair; Git decides whether the branches actually collide. Every
+        # nominated pair is asked — the memo makes asking cheap after the first time.
+        memo = merge_memo(data_dir)
+        heads: Dict[str, str] = {}
         by_path: Dict[str, List[Dict[str, Any]]] = {}
         probes = 0
         nominated = 0
@@ -533,37 +578,37 @@ def scan_preemptive_conflicts(repo: Repository) -> None:
                 if not dirty[str(left["path"])] & dirty[str(right["path"])]:
                     continue
                 nominated += 1
-                if probes >= MAX_CONFLICT_PROBES:
-                    continue
                 probes += 1
-                for value in merge_conflict_paths(repo, str(left.get("branch") or ""), str(right.get("branch") or "")):
+                for value in merge_conflict_paths(repo, str(left.get("branch") or ""), str(right.get("branch") or ""), memo, heads):
                     group = by_path.setdefault(value, [])
                     group.extend(item for item in (left, right) if item not in group)
         conflicts = [{"path": path, "worktrees": worktrees_for} for path, worktrees_for in by_path.items()]
         # A conflict detector that quietly stops looking reads as "no conflicts", which is
         # the opposite of the truth, so how much it covered travels with the result.
-        coverage = {"probed": probes, "cap": MAX_CONFLICT_PROBES, "nominated": nominated, "complete": nominated <= MAX_CONFLICT_PROBES}
+        coverage = {"probed": probes, "nominated": nominated, "complete": probes >= nominated}
         with CONFLICT_SCAN_LOCK:
             CONFLICT_SCANS[repo.room_id] = (time.monotonic(), conflicts, coverage)
     finally:
-        pass
+        # An open handle keeps the file alive, which POSIX tolerates and Windows does not.
+        if memo is not None:
+            memo.close()
 
 
-def preemptive_conflicts(repo: Repository) -> List[Dict[str, Any]]:
+def preemptive_conflicts(repo: Repository, data_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
     """Paths two worktrees are both changing, where Git says the branches collide.
 
     This ran in a background thread so a browser snapshot could answer without waiting for
     it. There is no server now: every entry point is a short-lived process that exits before
     such a thread finishes, so the answer was always the empty cache and overlaps were never
-    reported at all. Run it here — it is bounded by MAX_CONFLICT_PROBES, and only `threads`,
-    `alerts`, and `board` ask, never the hook path.
+    reported at all. Run it here — only `threads`, `alerts`, and `board` ask, never the hook
+    path, and the memo keeps the repeat cost near nothing.
     """
     now = time.monotonic()
     with CONFLICT_SCAN_LOCK:
         cached = CONFLICT_SCANS.get(repo.room_id)
         if cached and now - cached[0] < CONFLICT_SCAN_TTL_SECONDS:
             return cached[1]
-    scan_preemptive_conflicts(repo)
+    scan_preemptive_conflicts(repo, data_dir)
     with CONFLICT_SCAN_LOCK:
         settled = CONFLICT_SCANS.get(repo.room_id)
     return settled[1] if settled else []
@@ -572,7 +617,7 @@ def preemptive_conflicts(repo: Repository) -> List[Dict[str, Any]]:
 def conflict_scan_coverage(repo: Repository) -> Dict[str, Any]:
     with CONFLICT_SCAN_LOCK:
         cached = CONFLICT_SCANS.get(repo.room_id)
-    return dict(cached[2]) if cached and len(cached) > 2 else {"probed": 0, "cap": MAX_CONFLICT_PROBES, "nominated": 0, "complete": True}
+    return dict(cached[2]) if cached and len(cached) > 2 else {"probed": 0, "nominated": 0, "complete": True}
 
 
 def incomplete_coverage(repo: Repository) -> Dict[str, Any]:
@@ -1158,13 +1203,22 @@ class RoomStore:
         collision now and discovering it while trying to land.
         """
         target = (into or "").strip() or (repo.branch if repo.branch in ("main", "master") else "main")
+        memo = merge_memo(self.data_dir)
+        heads: Dict[str, str] = {}
+        try:
+            return self._merge_readiness(repo, target, memo, heads)
+        finally:
+            if memo is not None:
+                memo.close()
+
+    def _merge_readiness(self, repo: Repository, target: str, memo: Optional[sqlite3.Connection], heads: Dict[str, str]) -> Dict[str, Any]:
         branches: List[Dict[str, Any]] = []
         touched: Dict[str, Set[str]] = {}
         for worktree in list_worktree_references(repo):
             branch = str(worktree.get("branch") or "")
             if not branch or branch == target or branch in touched:
                 continue
-            conflicts = sorted(merge_conflict_paths(repo, target, branch))
+            conflicts = sorted(merge_conflict_paths(repo, target, branch, memo, heads))
             touched[branch] = branch_changed_paths(repo, target, branch)
             branches.append({
                 "branch": branch, "target": str(worktree["target"]),
@@ -1185,13 +1239,8 @@ class RoomStore:
                 if not touched[left["branch"]] & touched[right["branch"]]:
                     continue
                 nominated += 1
-                # Counting past the cap rather than breaking: how much was left unchecked
-                # is the difference between a complete answer and a partial one, and the
-                # caller cannot tell them apart unless it is told.
-                if probes >= MAX_CONFLICT_PROBES:
-                    continue
                 probes += 1
-                shared = sorted(merge_conflict_paths(repo, left["branch"], right["branch"]))
+                shared = sorted(merge_conflict_paths(repo, left["branch"], right["branch"], memo, heads))
                 if not shared:
                     continue
                 by_branch[left["branch"]]["collides_with"].append({"branch": right["branch"], "paths": shared})
@@ -1205,10 +1254,10 @@ class RoomStore:
             "latent": sum(1 for b in branches if b["merges_cleanly"] and b["collides_with"]),
             "pairs_probed": probes,
             "pairs_nominated": nominated,
-            "complete": nominated <= MAX_CONFLICT_PROBES,
+            "complete": probes >= nominated,
             "branches": branches,
         }
-        if not verdict["complete"]:
+        if not verdict["complete"]:  # no cap remains, so this can only mean a probe failed
             verdict["detail"] = (f"{nominated} branch pairs share a changed file but only {probes} were checked "
                                  f"against Git. `latent` counts what was checked, so treat it as a floor, not a total.")
         return verdict
@@ -1381,7 +1430,7 @@ class RoomStore:
         # asynchronous and the first caller had nothing to act on yet. The scan is
         # synchronous now, so every caller has the answer — and the old guard meant a
         # short-lived CLI process, which is always the first caller, never opened a thread.
-        conflicts = preemptive_conflicts(repo)
+        conflicts = preemptive_conflicts(repo, self.data_dir)
         grouped: Dict[Tuple[str, ...], Dict[str, Any]] = {}
         for conflict in conflicts:
             stable_targets = tuple(sorted(str(item["target"]) for item in conflict["worktrees"]))

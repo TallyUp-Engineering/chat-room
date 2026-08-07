@@ -496,38 +496,74 @@ class RoomTests(unittest.TestCase):
         self.assertNotIn("merge-tree", flat)
         self.assertNotIn("--porcelain", flat)
 
-    def test_merge_readiness_says_when_it_only_looked_at_some_of_the_pairs(self):
-        """Found against a 40-worktree project: 40 of 820 pairs probed, reported as if whole.
-
-        The cap is exercised by lowering it rather than by building forty worktrees — the
-        behaviour that matters is what happens on the far side of the bound, not the size of
-        the fixture that gets there.
-        """
+    def test_merge_readiness_asks_about_every_pair_that_shares_a_file(self):
+        """There is no cap. A repository with forty worktrees used to get five per cent of
+        its pairs checked and no indication of it; every nominated pair is now asked."""
         repo = self.repo()
-        worktrees = [{"target": f"#lane-{i}", "name": f"lane-{i}", "path": f"/project/{i}", "branch": f"lane-{i}"} for i in range(4)]
+        worktrees = [{"target": f"#lane-{i}", "name": f"lane-{i}", "path": f"/project/{i}", "branch": f"lane-{i}"} for i in range(8)]
         with mock.patch.object(room, "list_worktree_references", return_value=worktrees), \
              mock.patch.object(room, "branch_changed_paths", return_value={"app/ui.tsx"}), \
-             mock.patch.object(room, "merge_conflict_paths", return_value=set()), \
-             mock.patch.object(room, "changed_worktree_paths", return_value=set()), \
-             mock.patch.object(room, "MAX_CONFLICT_PROBES", 2), \
-             tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store:
-            verdict = store.merge_readiness(repo, "main")
-        self.assertEqual(verdict["pairs_nominated"], 6, "every pair shares a file, so all six are nominated")
-        self.assertEqual(verdict["pairs_probed"], 2, "the cap was not applied")
-        self.assertFalse(verdict["complete"])
-        self.assertIn("floor, not a total", verdict["detail"])
-
-    def test_merge_readiness_claims_completeness_only_when_it_has_it(self):
-        repo = self.repo()
-        worktrees = [{"target": f"#lane-{i}", "name": f"lane-{i}", "path": f"/project/{i}", "branch": f"lane-{i}"} for i in range(3)]
-        with mock.patch.object(room, "list_worktree_references", return_value=worktrees), \
-             mock.patch.object(room, "branch_changed_paths", return_value={"app/ui.tsx"}), \
-             mock.patch.object(room, "merge_conflict_paths", return_value=set()), \
+             mock.patch.object(room, "merge_conflict_paths", return_value=set()) as probe, \
              mock.patch.object(room, "changed_worktree_paths", return_value=set()), \
              tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store:
             verdict = store.merge_readiness(repo, "main")
+        pairs = 8 * 7 // 2
+        self.assertEqual(verdict["pairs_nominated"], pairs)
+        self.assertEqual(verdict["pairs_probed"], pairs, "a pair went unchecked")
         self.assertTrue(verdict["complete"])
         self.assertNotIn("detail", verdict)
+        self.assertEqual(probe.call_count, pairs + len(worktrees), "one probe per pair, plus one per branch against main")
+
+    def test_a_merge_answer_is_remembered_against_the_commits_it_compared(self):
+        """Whether two commits conflict is fixed, so the answer can be kept forever. The key
+        is the pair of commits, which changes the moment either branch moves — that is what
+        makes a cache with no expiry safe here, and what makes removing the cap affordable."""
+        repo = self.repo()
+        heads = {"one": "a" * 40, "two": "b" * 40}
+        calls = {"n": 0}
+
+        def fake_run(command, *args, **kwargs):
+            calls["n"] += 1
+            return subprocess.CompletedProcess(command, 1, stdout="tree\napp/ui.tsx\n", stderr="")
+
+        with tempfile.TemporaryDirectory() as temp:
+            memo = room.merge_memo(Path(temp))
+            self.assertIsNotNone(memo)
+            # Closed inside the directory's own block: an addCleanup runs after it is gone,
+            # and Windows will not remove a directory whose file is still open.
+            try:
+                with mock.patch.object(room, "run_git", side_effect=lambda _c, *a, **k: heads[a[-1].split("^")[0]]), \
+                     mock.patch.object(room.subprocess, "run", side_effect=fake_run):
+                    first = room.merge_conflict_paths(repo, "one", "two", memo, {})
+                    second = room.merge_conflict_paths(repo, "one", "two", memo, {})
+                    # Order must not matter: the same two commits are the same question.
+                    third = room.merge_conflict_paths(repo, "two", "one", memo, {})
+            finally:
+                memo.close()
+        self.assertEqual(first, {"app/ui.tsx"})
+        self.assertEqual(second, first)
+        self.assertEqual(third, first)
+        self.assertEqual(calls["n"], 1, "the memo did not spare a repeat merge-tree")
+
+    def test_a_clean_merge_is_remembered_too(self):
+        repo = self.repo()
+        calls = {"n": 0}
+
+        def fake_run(command, *args, **kwargs):
+            calls["n"] += 1
+            return subprocess.CompletedProcess(command, 0, stdout="tree\n", stderr="")
+
+        with tempfile.TemporaryDirectory() as temp:
+            memo = room.merge_memo(Path(temp))
+            try:
+                with mock.patch.object(room, "run_git", side_effect=lambda _c, *a, **k: "c" * 40 if "one" in a[-1] else "d" * 40), \
+                     mock.patch.object(room.subprocess, "run", side_effect=fake_run):
+                    self.assertEqual(room.merge_conflict_paths(repo, "one", "two", memo, {}), set())
+                    self.assertEqual(room.merge_conflict_paths(repo, "one", "two", memo, {}), set())
+            finally:
+                memo.close()
+        # Most pairs are clean. Re-proving that every run is what made a sweep unaffordable.
+        self.assertEqual(calls["n"], 1, "a clean answer was not remembered")
 
     def test_a_truncated_conflict_scan_says_so(self):
         repo = self.repo()
