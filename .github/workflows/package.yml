@@ -1,0 +1,106 @@
+name: Package
+
+# The Python package. Build and publish are separate jobs on purpose: the artifact that
+# gets published is the one that was built and inspected, and a failed publish never
+# silently rebuilds from a different tree.
+#
+# Publishing needs PyPI Trusted Publishing configured once for this repository and the
+# workflow filename `package.yml`, with a GitHub environment named `pypi`. Until that
+# exists the build job still runs on every tag and the publish job is the only thing
+# that fails, which is the safe way round.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish to PyPI as well as building
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: build distributions
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      # The version is read from the program itself, so a tag that disagrees with it
+      # would publish something other than what it claims to be.
+      - name: Hold the tag to the version the program reports
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          declared=$(python -c "import re,pathlib; print(re.search(r'^VERSION = \"([^\"]+)\"', pathlib.Path('plugins/chat-room/scripts/room.py').read_text(), re.M).group(1))")
+          tagged="${GITHUB_REF_NAME#v}"
+          if [ "$declared" != "$tagged" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match VERSION $declared in room.py"
+            exit 1
+          fi
+          echo "Building chat-room $declared"
+
+      - run: python -m pip install --disable-pip-version-check build twine
+      - run: python -m build
+
+      # A wheel that imports is not the same as a wheel that carries its data files. The
+      # skills, hooks, and manifests are what make an installed copy behave like a checkout.
+      - name: Check the distributions carry what the plugin needs
+        run: |
+          python -m twine check dist/*
+          python - <<'PY'
+          import glob, zipfile, sys
+          wheel = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          required = ["chat_room/hooks/hooks.json", "chat_room/.mcp.json", "chat_room/.codex-plugin/plugin.json"]
+          missing = [name for name in required if name not in names]
+          skills = [name for name in names if name.startswith("chat_room/skills/") and name.endswith(".md")]
+          if not skills:
+              missing.append("chat_room/skills/*/SKILL.md")
+          if missing:
+              sys.exit(f"{wheel} is missing {missing}")
+          print(f"{wheel} carries {len(skills)} skill(s) and every manifest")
+          PY
+
+      # Installing from the built wheel is the only way to know the console script and
+      # its data files survived packaging.
+      - name: Run the command from the built wheel
+        run: |
+          python -m venv /tmp/probe
+          /tmp/probe/bin/pip install --disable-pip-version-check "$(ls dist/*.whl)"
+          /tmp/probe/bin/chat-room --version
+          /tmp/probe/bin/chat-room doctor
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: distributions
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: publish to PyPI
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: https://pypi.org/p/chat-room
+    permissions:
+      id-token: write  # Trusted Publishing. No API token is stored anywhere.
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: distributions
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
