@@ -443,7 +443,9 @@ class RoomTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store, mock.patch.object(room, "list_worktree_references", return_value=worktrees):
             store.upsert_presence(repo, "session:one", "claude-session-one", None, "claude:lane", "online", "Stop")
-            with mock.patch.object(room, "spawn_cli_turn", return_value={"process": FakeProcess(), "log": "x", "client": "claude"}) as spawn:
+            # Pinned under the cooldown: a freshly booted machine reports a small
+            # monotonic clock, and a never-delivered session must still be reachable.
+            with mock.patch.object(room, "spawn_cli_turn", return_value={"process": FakeProcess(), "log": "x", "client": "claude"}) as spawn, mock.patch.object(room.time, "monotonic", return_value=3.0):
                 posted = store.post(repo, "@human", "message", "general", "posted", "@claude-lane please rebase", [])
             self.assertEqual(posted["wake"]["started"], ["@claude-lane"])
             self.assertIn("please rebase", spawn.call_args[0][3])

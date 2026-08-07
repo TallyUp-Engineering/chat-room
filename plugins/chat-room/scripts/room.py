@@ -1266,8 +1266,10 @@ class RoomStore:
             if message.get("session_id") == session_id or running_delivery(client, session_id):
                 continue
             with CHAT_DELIVERY_LOCK:
-                previous = CHAT_DELIVERIES.get((client, session_id), {})
-                recent = time.monotonic() - float(previous.get("started_at") or 0) < WAKE_COOLDOWN_SECONDS
+                # Absence means never delivered. Reading it as "delivered at monotonic 0"
+                # swallows the first tag on any machine whose uptime is under the cooldown.
+                previous = CHAT_DELIVERIES.get((client, session_id))
+                recent = previous is not None and time.monotonic() - float(previous.get("started_at") or 0) < WAKE_COOLDOWN_SECONDS
             if recent:
                 continue
             result["attempted"] += 1
