@@ -1974,6 +1974,14 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    # Windows consoles default to a legacy code page. Room messages are user text and the
+    # board is drawn with box characters, so printing is otherwise free to fail on content
+    # rather than on anything being wrong. Replace what a console cannot draw; never raise.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        except (AttributeError, OSError, ValueError):
+            pass
     args = parser().parse_args(argv)
     try:
         if args.command == "doctor":

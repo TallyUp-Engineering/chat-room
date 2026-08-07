@@ -189,6 +189,22 @@ class CommandTests(unittest.TestCase):
         row = [line for line in protocol.splitlines() if "`chat-room spend`" in line][0]
         self.assertIn("index", row, "protocol.md does not say that spend needs the optional index")
 
+    def test_printing_never_fails_on_the_content_it_is_asked_to_print(self):
+        """The board is drawn with box characters and room messages are user text.
+
+        A console on a legacy code page must degrade the glyph, not kill the command —
+        `chat-room board` did exactly that on Windows until stdout was reconfigured.
+        """
+        self.cli("post", "--cwd", str(self.proj), "--kind", "message", "--topic", "unicode",
+                 "--message", "handoff ready — naïve café 日本語 ✅")
+        legacy = {**os.environ, "PYTHONIOENCODING": "cp1252"}
+        for command in (["board", "--cwd", str(self.proj)], ["read", "--cwd", str(self.proj), "--limit", "5"]):
+            with self.subTest(command=command[0]):
+                done = subprocess.run([sys.executable, str(ROOM), "--data-dir", str(self.data), *command],
+                                      text=True, capture_output=True, timeout=120, env=legacy)
+                self.assertEqual(done.returncode, 0, f"{command[0]} failed on a legacy code page: {done.stderr.strip()}")
+                self.assertNotIn("UnicodeEncodeError", done.stderr)
+
     def test_the_process_boundary_covers_every_subcommand(self):
         """Every subcommand is either exercised here or named as deliberately uncovered.
 
