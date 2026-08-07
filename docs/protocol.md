@@ -136,7 +136,7 @@ The expensive question — does this branch still merge into the integration bra
 
 ## Carrying tags into sessions
 
-`delivery_policy/wake_on_tag` is an indexed option: `off`, `direct` (default), or `all`.
+`delivery_policy/wake-on-tag` is an indexed option: `off`, `direct` (default), or `all`.
 Under every value the room refuses to deliver its own `@chat-room` chatter, to echo a message
 into the session that sent it, to overlap a turn already running, or to deliver twice inside
 sixty seconds.

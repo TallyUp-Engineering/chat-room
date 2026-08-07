@@ -71,8 +71,17 @@ BOARD_COLUMNS = ("backlog", "doing", "blocked", "done")
 RULE_RUNGS = ("off", "advise", "warn", "refuse")
 RULE_SEVERITY = {"advise": "warning", "warn": "attention", "refuse": "critical"}
 STALE_WORKTREE_DAYS = 30
-# The option index slugs every key, so this is the key as it is actually stored and typed.
-STALE_WORKTREE_DAYS_KEY = "stale-worktree-days"
+# Every option namespace and key this program touches, named once. `set_option` slugs keys
+# on write and every read slugs too, so a literal spelled with an underscore is written to
+# one row and read from another. A test asserts each of these survives slugging unchanged.
+NS_RULES = "rules"
+NS_DELIVERY = "delivery_policy"
+NS_NOTIFICATION = "notification_policy"
+NS_ROOM_NAME = "room_name"
+NS_CHAT_NAME = "chat_name"
+KEY_WAKE_ON_TAG = "wake-on-tag"
+KEY_STALE_WORKTREE_DAYS = "stale-worktree-days"
+OPTION_KEYS = (KEY_WAKE_ON_TAG, KEY_STALE_WORKTREE_DAYS)
 RULE_CATALOG = (
     ("one-actor-per-worktree", "advise", "shared-worktree", "More than one active agent in one worktree."),
     ("file-overlap", "advise", "file-overlap", "Two worktrees currently modifying the same path."),
@@ -81,8 +90,7 @@ RULE_CATALOG = (
 # One tag must not be able to bill a vendor turn on a loop.
 WAKE_COOLDOWN_SECONDS = 60
 CONFLICT_SCAN_LOCK = threading.Lock()
-CONFLICT_SCANS: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
-CONFLICT_SCANS_RUNNING: Set[str] = set()
+CONFLICT_SCANS: Dict[str, Tuple[Any, ...]] = {}
 
 
 # One source of truth for the shape. `_migrate` applies it and the doctor builds a throwaway
@@ -477,34 +485,67 @@ def scan_preemptive_conflicts(repo: Repository) -> None:
         # starts missing pairs, or key the cache on branch heads to skip unchanged pairs.
         by_path: Dict[str, List[Dict[str, Any]]] = {}
         probes = 0
+        nominated = 0
         for index, left in enumerate(worktrees):
             for right in worktrees[index + 1:]:
-                if probes >= MAX_CONFLICT_PROBES:
-                    break
                 if not dirty[str(left["path"])] & dirty[str(right["path"])]:
+                    continue
+                nominated += 1
+                if probes >= MAX_CONFLICT_PROBES:
                     continue
                 probes += 1
                 for value in merge_conflict_paths(repo, str(left.get("branch") or ""), str(right.get("branch") or "")):
                     group = by_path.setdefault(value, [])
                     group.extend(item for item in (left, right) if item not in group)
         conflicts = [{"path": path, "worktrees": worktrees_for} for path, worktrees_for in by_path.items()]
+        # A conflict detector that quietly stops looking reads as "no conflicts", which is
+        # the opposite of the truth, so how much it covered travels with the result.
+        coverage = {"probed": probes, "cap": MAX_CONFLICT_PROBES, "nominated": nominated, "complete": nominated <= MAX_CONFLICT_PROBES}
         with CONFLICT_SCAN_LOCK:
-            CONFLICT_SCANS[repo.room_id] = (time.monotonic(), conflicts)
+            CONFLICT_SCANS[repo.room_id] = (time.monotonic(), conflicts, coverage)
     finally:
-        with CONFLICT_SCAN_LOCK:
-            CONFLICT_SCANS_RUNNING.discard(repo.room_id)
+        pass
 
 
 def preemptive_conflicts(repo: Repository) -> List[Dict[str, Any]]:
+    """Paths two worktrees are both changing, where Git says the branches collide.
+
+    This ran in a background thread so a browser snapshot could answer without waiting for
+    it. There is no server now: every entry point is a short-lived process that exits before
+    such a thread finishes, so the answer was always the empty cache and overlaps were never
+    reported at all. Run it here — it is bounded by MAX_CONFLICT_PROBES, and only `threads`,
+    `alerts`, and `board` ask, never the hook path.
+    """
     now = time.monotonic()
     with CONFLICT_SCAN_LOCK:
         cached = CONFLICT_SCANS.get(repo.room_id)
         if cached and now - cached[0] < CONFLICT_SCAN_TTL_SECONDS:
             return cached[1]
-        if repo.room_id not in CONFLICT_SCANS_RUNNING:
-            CONFLICT_SCANS_RUNNING.add(repo.room_id)
-            threading.Thread(target=scan_preemptive_conflicts, args=(repo,), daemon=True).start()
-        return cached[1] if cached else []
+    scan_preemptive_conflicts(repo)
+    with CONFLICT_SCAN_LOCK:
+        settled = CONFLICT_SCANS.get(repo.room_id)
+    return settled[1] if settled else []
+
+
+def conflict_scan_coverage(repo: Repository) -> Dict[str, Any]:
+    with CONFLICT_SCAN_LOCK:
+        cached = CONFLICT_SCANS.get(repo.room_id)
+    return dict(cached[2]) if cached and len(cached) > 2 else {"probed": 0, "cap": MAX_CONFLICT_PROBES, "nominated": 0, "complete": True}
+
+
+def incomplete_coverage(repo: Repository) -> Dict[str, Any]:
+    """A `conflict_scan` key, but only when the scan did not see everything.
+
+    Present means the answer is partial. Absent means the pairing was covered, so a caller
+    that ignores the key never mistakes a truncated scan for a clean room.
+    """
+    coverage = conflict_scan_coverage(repo)
+    if coverage.get("complete", True):
+        return {}
+    coverage["detail"] = (f"{coverage['nominated']} worktree pairs share a changed path but only "
+                          f"{coverage['probed']} were checked against Git. Some collisions may be unreported; "
+                          f"run `chat-room ready` for a per-branch answer.")
+    return {"conflict_scan": coverage}
 
 
 def coordination_alerts(targets: Dict[str, Any], threads: Sequence[Dict[str, Any]], rules: Optional[Dict[str, Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
@@ -866,10 +907,24 @@ class RoomStore:
         # Rules are deliberately not seeded. An absent row means nobody has decided yet,
         # which is the difference between a default and an answer — and the only way
         # `chat-room rules` can tell an interrogation what is still worth asking.
+        # An option key that is not slug-stable can never be read back: writes slug it and
+        # reads slug it, so a row stored any other way is stranded. Carry the value across
+        # to the reachable key and drop the stranded row.
+        for stranded in self.connection.execute("SELECT namespace,key,value,metadata_json FROM option_index").fetchall():
+            settled = slug(str(stranded["key"]))
+            if settled == str(stranded["key"]):
+                continue
+            self.connection.execute(
+                "INSERT OR IGNORE INTO option_index(namespace,key,value,metadata_json) VALUES(?,?,?,?)",
+                (stranded["namespace"], settled, stranded["value"], stranded["metadata_json"]),
+            )
+            self.connection.execute("DELETE FROM option_index WHERE namespace=? AND key=?", (stranded["namespace"], stranded["key"]))
+
         defaults = (
-            ("delivery_policy", "wake_on_tag", "direct", {"label": "Carry tags into idle sessions", "choices": "off, direct, all"}),
+            (NS_DELIVERY, KEY_WAKE_ON_TAG, "direct", {"label": "Carry tags into idle sessions", "choices": "off, direct, all"}),
         )
         self.connection.executemany("INSERT OR IGNORE INTO option_index(namespace,key,value,metadata_json) VALUES(?,?,?,?)", [(namespace, key, value, json.dumps(metadata, sort_keys=True)) for namespace, key, value, metadata in defaults])
+
         row = self.connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
         installed = int(str(row["value"])) if row and str(row["value"]).isdigit() else 0
         if installed < 5:
@@ -928,7 +983,7 @@ class RoomStore:
         records the ones an operator has moved. An unset rule reports its default rather
         than being absent, so `chat-room rules` always shows the whole surface.
         """
-        stored = {str(item["key"]): item for item in self.options().get("rules", [])}
+        stored = {str(item["key"]): item for item in self.options().get(NS_RULES, [])}
         result: Dict[str, Dict[str, Any]] = {}
         for name, default, governs, condition in RULE_CATALOG:
             entry = stored.get(name)
@@ -944,13 +999,13 @@ class RoomStore:
             }
             if name == "stale-worktrees":
                 item["parameter"] = self.rule_parameter(STALE_WORKTREE_DAYS)
-                item["parameter_key"] = f"notification_policy/{STALE_WORKTREE_DAYS_KEY}"
+                item["parameter_key"] = f"{NS_NOTIFICATION}/{KEY_STALE_WORKTREE_DAYS}"
             result[name] = item
         return result
 
     def rule_parameter(self, fallback: int) -> int:
         try:
-            return max(1, int(str(self.option("notification_policy", STALE_WORKTREE_DAYS_KEY)["value"])))
+            return max(1, int(str(self.option(NS_NOTIFICATION, KEY_STALE_WORKTREE_DAYS)["value"])))
         except (RoomError, ValueError):
             return fallback
 
@@ -963,12 +1018,12 @@ class RoomStore:
     def rename(self, repo: Repository, kind: str, reference: str, label: str, client: str = "") -> Dict[str, Any]:
         clean = concise(ensure_value_free(label), 120)
         if kind == "room":
-            value = self.set_option("room_name", repo.room_id, clean, {"kind": "room"})
+            value = self.set_option(NS_ROOM_NAME, repo.room_id, clean, {"kind": "room"})
         elif kind == "chat":
             summaries, _files = discover_chat_catalog(repo)
             if not any(item["id"] == reference and str(item["client"]).lower() == client.lower() for item in summaries):
                 raise RoomError("local chat session was not found in this Git project")
-            value = self.set_option("chat_name", f"{client}-{reference}", clean, {"kind": "chat", "client": client, "session_id": reference})
+            value = self.set_option(NS_CHAT_NAME, f"{client}-{reference}", clean, {"kind": "chat", "client": client, "session_id": reference})
         elif kind == "channel":
             self.thread(repo, reference)
             self.connection.execute("UPDATE threads SET title=?,updated_at=? WHERE room_id=? AND id=?", (clean, utc_now(), repo.room_id, reference))
@@ -1196,7 +1251,15 @@ class RoomStore:
                 "participants": thread["participants"], "owners": owners, "paths": thread["paths"],
                 "lifetime": thread["lifetime"], "status": thread["status"], "updated_at": thread["updated_at"],
             })
-        return {"room_id": repo.room_id, "columns": columns, "counts": {name: len(items) for name, items in columns.items()}}
+        carded = {owner for items in columns.values() for item in items for owner in item["owners"]}
+        elsewhere = [
+            {"target": str(member["target"]), "worktree_target": str(member["worktree_target"]), "state": str(member["state"])}
+            for member in self.members(repo.room_id)
+            if str(member.get("state") or "") != "offline" and str(member["target"]) not in carded
+        ]
+        return {"room_id": repo.room_id, "columns": columns,
+                "counts": {name: len(items) for name, items in columns.items()},
+                "active_elsewhere": sorted(elsewhere, key=lambda item: item["target"])}
 
     def thread(self, repo: Repository, thread_id: str) -> Dict[str, Any]:
         value = next((item for item in self.threads(repo, True) if item["id"] == thread_id), None)
@@ -1256,11 +1319,11 @@ class RoomStore:
     def sync_preemptive_conflicts(self, repo: Repository) -> List[Dict[str, Any]]:
         active_ids: Set[str] = set()
         members = self.members(repo.room_id)
-        with CONFLICT_SCAN_LOCK:
-            had_scan = repo.room_id in CONFLICT_SCANS
+        # This used to return early unless a scan had already run, because the scan was
+        # asynchronous and the first caller had nothing to act on yet. The scan is
+        # synchronous now, so every caller has the answer — and the old guard meant a
+        # short-lived CLI process, which is always the first caller, never opened a thread.
         conflicts = preemptive_conflicts(repo)
-        if not had_scan:
-            return self.threads(repo)
         grouped: Dict[Tuple[str, ...], Dict[str, Any]] = {}
         for conflict in conflicts:
             stable_targets = tuple(sorted(str(item["target"]) for item in conflict["worktrees"]))
@@ -1305,7 +1368,7 @@ class RoomStore:
 
     def post(self, repo: Repository, sender: str, kind: str, topic: str, status: str, message: str, recipients: Sequence[str], session_id: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         self._require_writable()
-        if kind not in MESSAGE_KINDS: raise RoomError("unsupported message kind")
+        if kind not in MESSAGE_KINDS: raise RoomError(f"unsupported message kind {kind!r}; use one of: {', '.join(MESSAGE_KINDS)}")
         self.register_room(repo)
         body = ensure_value_free(message)
         resolved = self.resolve_targets(repo, recipients, body)
@@ -1365,7 +1428,7 @@ class RoomStore:
         deliberately narrow: only a direct @handle by default, never system chatter, never
         the sender's own session, and never twice inside the cooldown.
         """
-        policy = self.display_name("delivery_policy", "wake_on_tag", "direct")
+        policy = self.display_name(NS_DELIVERY, KEY_WAKE_ON_TAG, "direct")
         result: Dict[str, Any] = {"attempted": 0, "started": [], "failed": [], "policy": policy}
         recipients = set(message["recipients"])
         if policy == "off" or not recipients or str(message.get("sender") or "") == "@chat-room":
@@ -1828,12 +1891,18 @@ def render_board(board: Dict[str, Any], width: int = 0) -> str:
         stack: List[str] = []
         for card in columns[name]:
             stack.append(cell(card["title"]))
-            detail = ", ".join(card["owners"]) if card["owners"] else ("waiting on @human" if name == "blocked" else card["reason"])
+            # A blocked card's useful fact is what it waits on, not who opened it.
+            detail = "waiting on @human" if name == "blocked" else (", ".join(card["owners"]) or card["reason"])
             stack.append(cell(detail, indent=2))
             stack.append(cell(""))
         stacks.append(stack or [cell("—")])
     for row in range(max(len(stack) for stack in stacks)):
         lines.append("   ".join(stack[row] if row < len(stack) else cell("") for stack in stacks).rstrip())
+    # Work in flight that no card represents would otherwise read as an empty board.
+    unheld = board.get("active_elsewhere") or []
+    if unheld:
+        lines.append("")
+        lines.append("Active with no card: " + ", ".join(f"{item['target']} in {item['worktree_target']}" for item in unheld))
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -1918,10 +1987,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             repo = select_repository(store, getattr(args, "cwd", None))
             if args.command == "status":
                 value = store.status(repo)
-                value["display_name"] = store.display_name("room_name", repo.room_id, repo.worktree.name or "Chat Room")
+                value["display_name"] = store.display_name(NS_ROOM_NAME, repo.room_id, repo.worktree.name or "Chat Room")
             elif args.command == "targets": value = store.targets(repo)
             elif args.command == "members": value = {"room_id": repo.room_id, "members": store.members(repo.room_id)}
-            elif args.command == "threads": value = {"room_id": repo.room_id, "threads": store.sync_preemptive_conflicts(repo)}
+            elif args.command == "threads":
+                value = {"room_id": repo.room_id, "threads": store.sync_preemptive_conflicts(repo)}
+                value.update(incomplete_coverage(repo))
             elif args.command == "options": value = {"room_id": repo.room_id, "options": store.options()}
             elif args.command == "read": value = {"room_id": repo.room_id, "messages": store.read(repo.room_id, args.after_id, args.limit)}
             elif args.command == "identify": value = store.claim_handle(repo, args.session, args.handle)
@@ -1929,14 +2000,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             elif args.command == "stop": value = stop_delivery(args.client, args.session)
             elif args.command == "send": value = start_chat_delivery(args.data_dir, repo, args.client, args.session, args.message, store.members(repo.room_id), chat_images(args.image))
             elif args.command == "rename": value = store.rename(repo, args.kind, args.reference, args.label, args.client)
-            elif args.command == "alerts": value = {"room_id": repo.room_id, "alerts": coordination_alerts(store.targets(repo), store.sync_preemptive_conflicts(repo), store.rules())}
+            elif args.command == "alerts":
+                value = {"room_id": repo.room_id, "alerts": coordination_alerts(store.targets(repo), store.sync_preemptive_conflicts(repo), store.rules())}
+                value.update(incomplete_coverage(repo))
             elif args.command == "board":
                 print(render_board(store.board(repo)), end="")
                 return 0
-            elif args.command == "rules": value = {"room_id": repo.room_id, "rungs": list(RULE_RUNGS), "rules": store.rules(), "set_with": "chat-room option-set --namespace rules --key <name> --value <rung>"}
+            elif args.command == "rules": value = {"room_id": repo.room_id, "rungs": list(RULE_RUNGS), "rules": store.rules(), "set_with": f"chat-room option-set --namespace {NS_RULES} --key <name> --value <rung>"}
             elif args.command == "chats":
                 chats, _files = discover_chat_catalog(repo)
-                for chat in chats: chat["title"] = store.display_name("chat_name", f"{chat['client']}-{chat['id']}", str(chat["title"]))
+                for chat in chats: chat["title"] = store.display_name(NS_CHAT_NAME, f"{chat['client']}-{chat['id']}", str(chat["title"]))
                 value = {"room_id": repo.room_id, "chats": chats}
             elif args.command == "index": value = run_index(args.data_dir, repo)
             elif args.command == "ready": value = store.merge_readiness(repo, args.into)
