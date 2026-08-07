@@ -15,8 +15,9 @@ defaults:
 jobs:
   room:
     # The room is claimed to run on macOS, Linux and Windows, so it is tested on all
-    # three. Windows is advisory until the platform work lands — it reports the truth
-    # rather than being left untested, and becomes blocking once it is green.
+    # three, and all three block. Windows was advisory while it was red for a real
+    # reason: the index test held a SQLite file open across a directory removal, which
+    # POSIX permits and Windows does not.
     name: room (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.advisory }}
@@ -30,7 +31,7 @@ jobs:
           - os: macos-latest
             advisory: false
           - os: windows-latest
-            advisory: true
+            advisory: false
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
