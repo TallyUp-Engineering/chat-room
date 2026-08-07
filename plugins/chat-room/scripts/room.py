@@ -36,6 +36,9 @@ DATA_ENV = "CHAT_ROOM_DATA"
 # menu nobody chose from rather than a vocabulary that meant anything.
 MESSAGE_KINDS = ("message", "allocation", "handoff")
 CONTEXT_EVENTS = ("SessionStart", "UserPromptSubmit", "SubagentStart")
+# Where a session comes to rest. A tag that arrives while it is working has nowhere to go
+# until this fires: nothing outside a process can reach it once it is parked at a prompt.
+REST_EVENTS = ("Stop", "SubagentStop")
 SECRET_PATTERNS = (
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"\b(?:glpat|ghp|github_pat)_[A-Za-z0-9_-]{12,}\b"),
@@ -1552,8 +1555,15 @@ def refusals(store: "RoomStore", repo: Repository, participant_id: str) -> List[
     return reasons
 
 
-def hook_output(event: str, context: str = "", denials: Sequence[str] = ()) -> Dict[str, Any]:
+def hook_output(event: str, context: str = "", denials: Sequence[str] = (), pending: str = "") -> Dict[str, Any]:
     value: Dict[str, Any] = {"continue": True}
+    if pending:
+        # A session going to rest is the last moment it can be reached without an IPC
+        # channel it does not have. Hand it what arrived while it was working, so a tag
+        # lands in the session the human is watching rather than in a detached turn.
+        value["decision"] = "block"
+        value["reason"] = pending
+        return value
     if denials:
         # The only rung that can interrupt a turn, and only when an operator asked for it.
         reason = "Chat Room refused this write. " + " ".join(denials)
@@ -1576,7 +1586,14 @@ def run_hook(data_dir: Path) -> int:
             store.upsert_presence(repo, participant, session_id, agent_id, role, state, event, os.environ.get(WAKE_ENDPOINT_ENV) if client_name() == "codex" else None)
             context = compact_context(store, repo, participant, event) if event in CONTEXT_EVENTS else ""
             denials = refusals(store, repo, participant) if event == "PreToolUse" else []
-        print(json.dumps(hook_output(event, context, denials), separators=(",", ":")))
+            pending = ""
+            if event in REST_EVENTS and store.display_name(NS_DELIVERY, KEY_WAKE_ON_TAG, "direct") != "off":
+                # Reading it advances this participant's cursor, so the same message can
+                # never hold a session at the door twice.
+                waiting = compact_context(store, repo, participant, event)
+                if "New room messages:" in waiting:
+                    pending = waiting
+        print(json.dumps(hook_output(event, context, denials, pending), separators=(",", ":")))
     except Exception as error:
         print(json.dumps({"continue": True, "systemMessage": f"Chat Room unavailable: {error}"}))
     return 0
