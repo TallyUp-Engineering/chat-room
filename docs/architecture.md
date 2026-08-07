@@ -22,11 +22,13 @@ it, because a constraint nobody checks is a preference, and preferences erode.
 | 11 | Bounded coverage is reported. A scan that stops early says so, because a conflict detector that quietly stops looking reads as "no conflicts". | `test_a_truncated_conflict_scan_says_so` |
 | 12 | A value-free filter rejects credential shapes before anything is persisted. | `test_value_free_filter` |
 | 13 | Every user-facing read runs as a real process against a real Git project, not only against the store in-process. A bug that depends on the process exiting is invisible to any test that *is* that process. | `test_the_process_boundary_covers_every_subcommand`, `test_a_fresh_process_reports_the_conflict_it_finds` |
+| 16 | Nothing reaches PyPI that has not first been published to TestPyPI and installed back from that index. Publishing is irreversible and yanking is deliberately manual — Warehouse's yank route is UI-only and requires re-authentication — so the last check has to come before the irreversible step. | `.github/workflows/package.yml` (`rehearse` → `verify` → `publish`) |
 | 15 | Every bounded scan reports its own coverage. A cap that stops early without saying so turns a partial answer into a false clean bill of health, and both scanners are capped. | `test_a_truncated_conflict_scan_says_so`, `test_merge_readiness_says_when_it_only_looked_at_some_of_the_pairs` |
 | 14 | Bounded work is reported by the caller, not assumed by it. `spend` is the one read that cannot degrade without the optional index, and says so. | `test_spend_says_what_it_needs_when_the_index_is_absent` |
 
 ## Why this file is checked too
 
 `test_every_architecture_constraint_names_a_test_that_exists` parses the table above and fails
-when a row names a test that is gone. Deleting the enforcement without deleting the claim is
+when a row names a test that is gone. One row names a workflow rather than a test, because a
+release pipeline cannot be asserted from inside the suite it releases. Deleting the enforcement without deleting the claim is
 exactly how a document like this becomes decoration.
