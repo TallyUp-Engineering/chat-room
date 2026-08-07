@@ -173,6 +173,51 @@ class CommandTests(unittest.TestCase):
         finally:
             self.cli("option-set", "--cwd", str(self.proj), "--namespace", "rules", "--key", "file-overlap", "--value", "advise")
 
+    def test_a_tag_that_arrives_mid_turn_is_handed_over_when_the_session_rests(self):
+        """Nothing outside a process can reach it once it is parked at a prompt.
+
+        The tag addresses the worktree rather than the handle on purpose. A handle tag
+        dispatches a wake, and `find_cli_executable` probes `/opt/homebrew/bin` directly,
+        so no PATH change stops a suite from spawning a real vendor turn on the machine
+        running it. Both reach this session through the same injected context.
+
+        The moment it comes to rest is the last chance, so a tag that arrived while it was
+        working is handed over there — in the session a human is watching, rather than in a
+        detached turn they never see.
+        """
+        lane = Path(self.proj).parent / "lane-two"
+        rest = json.dumps({"hook_event_name": "Stop", "cwd": str(lane), "session_id": "sess-api"})
+
+        # Drain anything already waiting, so the assertion is about the new tag alone.
+        self.cli("hook", stdin=rest, client="codex")
+        quiet = json.loads(self.cli("hook", stdin=rest, client="codex").stdout)
+        self.assertNotIn("decision", quiet, "a session with nothing waiting was held at the door")
+
+        self.cli("post", "--cwd", str(self.proj), "--sender", "@ui-agent", "--kind", "message",
+                 "--topic", "nav", "--message", "#lane-two please rebase onto main before landing")
+        handed = json.loads(self.cli("hook", stdin=rest, client="codex").stdout)
+        self.assertEqual(handed.get("decision"), "block", "the tag was not handed over at rest")
+        self.assertIn("please rebase onto main", handed["reason"])
+
+        # The same message must not hold it a second time, or the session never rests.
+        again = json.loads(self.cli("hook", stdin=rest, client="codex").stdout)
+        self.assertNotIn("decision", again, "the same tag held the session twice")
+
+    def test_the_delivery_policy_still_governs_handing_over_at_rest(self):
+        lane = Path(self.proj).parent / "lane-two"
+        rest = json.dumps({"hook_event_name": "Stop", "cwd": str(lane), "session_id": "sess-api"})
+        self.cli("hook", stdin=rest, client="codex")
+        self.cli("option-set", "--cwd", str(self.proj), "--namespace", "delivery_policy",
+                 "--key", "wake-on-tag", "--value", "off")
+        try:
+            self.cli("post", "--cwd", str(self.proj), "--sender", "@ui-agent", "--kind", "message",
+                     "--topic", "nav", "--message", "#lane-two this must not interrupt you")
+            answer = json.loads(self.cli("hook", stdin=rest, client="codex").stdout)
+            self.assertNotIn("decision", answer, "wake_on_tag=off still interrupted a session")
+        finally:
+            self.cli("option-set", "--cwd", str(self.proj), "--namespace", "delivery_policy",
+                     "--key", "wake-on-tag", "--value", "direct")
+
     # --- the surface as a whole ----------------------------------------------
 
     def test_every_read_only_subcommand_runs_and_answers(self):
