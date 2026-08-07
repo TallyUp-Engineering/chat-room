@@ -57,6 +57,24 @@ CHAT_DELIVERIES: Dict[Tuple[str, str], Dict[str, Any]] = {}
 MAX_CHAT_IMAGES = 5
 CONFLICT_SCAN_TTL_SECONDS = 30
 MAX_CONFLICT_PROBES = 40
+# House rules. One namespace decides how hard each one is, and nothing else in the room
+# decides severity — a rule names a condition the room can already observe, and its value
+# is the rung. Git's index is the model: a rule is declared intent staged against a
+# repository that stays authoritative. The room never enforces by mutating Git.
+#
+# `refuse` is binding on every agent that reads its injected context, which is how a hard
+# rule travels today. It is not mechanically blocked; `chat-room rules` says so plainly
+# rather than implying a guarantee the room cannot make.
+RULE_RUNGS = ("off", "advise", "warn", "refuse")
+RULE_SEVERITY = {"advise": "warning", "warn": "attention", "refuse": "critical"}
+STALE_WORKTREE_DAYS = 30
+# The option index slugs every key, so this is the key as it is actually stored and typed.
+STALE_WORKTREE_DAYS_KEY = "stale-worktree-days"
+RULE_CATALOG = (
+    ("one-actor-per-worktree", "advise", "shared-worktree", "More than one active agent in one worktree."),
+    ("file-overlap", "advise", "file-overlap", "Two worktrees currently modifying the same path."),
+    ("stale-worktrees", "advise", "stale-worktrees", "A worktree with no active actor and no recent branch commit."),
+)
 # One tag must not be able to bill a vendor turn on a loop.
 WAKE_COOLDOWN_SECONDS = 60
 CONFLICT_SCAN_LOCK = threading.Lock()
@@ -486,25 +504,38 @@ def preemptive_conflicts(repo: Repository) -> List[Dict[str, Any]]:
         return cached[1] if cached else []
 
 
-def coordination_alerts(targets: Dict[str, Any], threads: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def coordination_alerts(targets: Dict[str, Any], threads: Sequence[Dict[str, Any]], rules: Optional[Dict[str, Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+    """Turn what Git already shows into alerts, at whatever height the rules put them.
+
+    Every observation here is cheap and cached, because this runs on the hook path.
+    The expensive question — does this branch still merge into the integration branch —
+    stays in `chat-room ready`, where a human asked for it and can wait.
+    """
+    settled = rules if rules is not None else {name: {"rung": default} for name, default, _governs, _condition in RULE_CATALOG}
+    def rung(name: str) -> str:
+        return str((settled.get(name) or {}).get("rung") or "advise")
+
     alerts: List[Dict[str, Any]] = []
     agents = list(targets.get("agents") or [])
     for worktree in targets.get("worktrees") or []:
         count = int(worktree.get("active_agents") or 0)
-        if count < 2:
+        if count < 2 or rung("one-actor-per-worktree") == "off":
             continue
         participants = [str(worktree["target"])]
         participants.extend(str(agent["target"]) for agent in agents if str(agent.get("worktree") or "") == str(worktree.get("path") or ""))
         alerts.append({
             "id": "shared-worktree-" + hashlib.sha256(str(worktree["path"]).encode()).hexdigest()[:10],
-            "type": "shared-worktree", "severity": "warning", "icon": "shared-worktree",
+            "type": "shared-worktree", "severity": RULE_SEVERITY[rung("one-actor-per-worktree")], "icon": "shared-worktree",
+            "rule": "one-actor-per-worktree", "rung": rung("one-actor-per-worktree"),
             "title": f"{count} workers in {worktree['target']}",
             "detail": "Coordinate ownership before either actor writes.",
             "participants": participants, "paths": [], "thread_id": None,
         })
     for thread in threads:
         if thread["source"] == "preemptive-conflict":
-            alert_type, icon, severity = "file-overlap", "file-overlap", "warning"
+            if rung("file-overlap") == "off":
+                continue
+            alert_type, icon, severity = "file-overlap", "file-overlap", RULE_SEVERITY[rung("file-overlap")]
         elif thread["reason"] == "design direction":
             alert_type, icon, severity = "decision-needed", "decision-needed", "attention"
         elif thread["reason"] == "blocker":
@@ -518,6 +549,18 @@ def coordination_alerts(targets: Dict[str, Any], threads: Sequence[Dict[str, Any
             "title": thread["title"], "detail": thread["reason"], "participants": thread["participants"],
             "paths": thread["paths"], "thread_id": thread["id"],
         })
+    if rung("stale-worktrees") != "off":
+        days = int((settled.get("stale-worktrees") or {}).get("parameter") or STALE_WORKTREE_DAYS)
+        stale = [w for w in targets.get("worktrees") or [] if not int(w.get("active_agents") or 0) and isinstance(w.get("age_days"), int) and int(w["age_days"]) >= days]
+        if stale:
+            alerts.append({
+                "id": "stale-worktrees", "type": "stale-worktrees", "severity": RULE_SEVERITY[rung("stale-worktrees")], "icon": "stale-worktree",
+                "rule": "stale-worktrees", "rung": rung("stale-worktrees"),
+                "title": f"{len(stale)} worktree{'s' if len(stale) != 1 else ''} idle at least {days} days",
+                "detail": "No active actor and no branch commit in that window. Investigate before disposition; the room never deletes.",
+                "participants": ["@human", *[str(item["target"]) for item in stale]],
+                "paths": [str(item["path"]) for item in stale], "thread_id": None,
+            })
     return alerts
 
 
@@ -817,6 +860,9 @@ class RoomStore:
             self.behind = True
             return
         self.connection.executescript(SCHEMA_SQL)
+        # Rules are deliberately not seeded. An absent row means nobody has decided yet,
+        # which is the difference between a default and an answer — and the only way
+        # `chat-room rules` can tell an interrogation what is still worth asking.
         defaults = (
             ("delivery_policy", "wake_on_tag", "direct", {"label": "Carry tags into idle sessions", "choices": "off, direct, all"}),
         )
@@ -871,6 +917,39 @@ class RoomStore:
         self.connection.execute("INSERT INTO option_index(namespace,key,value,metadata_json) VALUES(?,?,?,?) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value,metadata_json=excluded.metadata_json", (clean_namespace, clean_key, clean_value, metadata_json))
         self.connection.commit()
         return self.option(clean_namespace, clean_key)
+
+    def rules(self) -> Dict[str, Dict[str, Any]]:
+        """Every house rule with the rung it currently sits at.
+
+        The catalog is the source of truth for which rules exist; the option index only
+        records the ones an operator has moved. An unset rule reports its default rather
+        than being absent, so `chat-room rules` always shows the whole surface.
+        """
+        stored = {str(item["key"]): item for item in self.options().get("rules", [])}
+        result: Dict[str, Dict[str, Any]] = {}
+        for name, default, governs, condition in RULE_CATALOG:
+            entry = stored.get(name)
+            value = str(entry["value"]) if entry else ""
+            rung = value if value in RULE_RUNGS else default
+            item: Dict[str, Any] = {
+                "rung": rung, "default": default, "governs": governs, "condition": condition,
+                "decided": bool(entry) and value in RULE_RUNGS,
+                # A refused rule binds every agent that reads its injected context. Nothing
+                # blocks the write itself, and saying otherwise would promise a guarantee
+                # this room cannot keep.
+                "mechanically_enforced": False,
+            }
+            if name == "stale-worktrees":
+                item["parameter"] = self.rule_parameter(STALE_WORKTREE_DAYS)
+                item["parameter_key"] = f"notification_policy/{STALE_WORKTREE_DAYS_KEY}"
+            result[name] = item
+        return result
+
+    def rule_parameter(self, fallback: int) -> int:
+        try:
+            return max(1, int(str(self.option("notification_policy", STALE_WORKTREE_DAYS_KEY)["value"])))
+        except (RoomError, ValueError):
+            return fallback
 
     def display_name(self, namespace: str, key: str, fallback: str) -> str:
         try:
@@ -1318,6 +1397,12 @@ def compact_context(store: RoomStore, repo: Repository, participant_id: str, eve
     if incoming:
         store.advance_cursor(repo.room_id, participant_id, incoming[-1]["id"])
     lines = [f"Chat Room (advisory): room={repo.room_id} handle={member['target']} worktree={member['worktree_target']} branch={repo.branch or 'detached'}.", "Use room tools for material coordination. Re-observe repository state before acting."]
+    # Rules the operator left at their default say nothing; carrying them would be noise in
+    # every turn. Only a rule deliberately raised above `advise` is worth a line, which is
+    # how a hard rule reaches an agent without anything interrupting it.
+    binding = [f"{name} ({item['rung']})" for name, item in store.rules().items() if item["rung"] in ("warn", "refuse")]
+    if binding:
+        lines.append("House rules in force — treat `refuse` as binding even though the room cannot block the write: " + ", ".join(binding) + ".")
     if messages:
         lines.append("New room messages:")
         lines.extend(f"[{m['id']}] {m['kind']} {m['sender']} -> {','.join(m['recipients']) or 'room'} [{m['topic']}]: {m['message']}" for m in messages)
@@ -1695,7 +1780,7 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--version", action="version", version=f"{PLUGIN_NAME} {VERSION} (schema {SCHEMA_VERSION})")
     sub = value.add_subparsers(dest="command", required=True)
     doctor = sub.add_parser("doctor"); doctor.add_argument("--cwd"); doctor.add_argument("--repair", action="store_true")
-    for name in ("status", "targets", "members", "threads", "options", "read", "chat", "alerts", "chats"):
+    for name in ("status", "targets", "members", "threads", "options", "read", "chat", "alerts", "chats", "rules"):
         command = sub.add_parser(name); command.add_argument("--cwd")
         if name == "read": command.add_argument("--after-id", type=int, default=0); command.add_argument("--limit", type=int, default=50)
         if name == "chat": command.add_argument("--sender", default="@human")
@@ -1743,7 +1828,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             elif args.command == "stop": value = stop_delivery(args.client, args.session)
             elif args.command == "send": value = start_chat_delivery(args.data_dir, repo, args.client, args.session, args.message, store.members(repo.room_id), chat_images(args.image))
             elif args.command == "rename": value = store.rename(repo, args.kind, args.reference, args.label, args.client)
-            elif args.command == "alerts": value = {"room_id": repo.room_id, "alerts": coordination_alerts(store.targets(repo), store.sync_preemptive_conflicts(repo))}
+            elif args.command == "alerts": value = {"room_id": repo.room_id, "alerts": coordination_alerts(store.targets(repo), store.sync_preemptive_conflicts(repo), store.rules())}
+            elif args.command == "rules": value = {"room_id": repo.room_id, "rungs": list(RULE_RUNGS), "rules": store.rules(), "set_with": "chat-room option-set --namespace rules --key <name> --value <rung>"}
             elif args.command == "chats":
                 chats, _files = discover_chat_catalog(repo)
                 for chat in chats: chat["title"] = store.display_name("chat_name", f"{chat['client']}-{chat['id']}", str(chat["title"]))

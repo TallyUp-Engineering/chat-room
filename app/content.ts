@@ -36,6 +36,7 @@ export const tagline = plugin.interface.shortDescription;
 export const readCommands = entries(commandLine.slice(0, writeAt));
 export const writeCommands = entries(commandLine.slice(writeAt));
 export const mcpTools = entries(section("MCP tools"));
+export const rungs = entries(section("House rules"));
 export const invariants = bullets(section("Invariants"));
 
 // `code` and **strong** spans, kept as data so the renderer stays markup-free.
