@@ -355,7 +355,7 @@ class RoomTests(unittest.TestCase):
     def test_the_protocol_document_matches_the_code(self):
         # The contract drifted once already: the document advertised seven tools when
         # there were fifteen. It is only a contract if it fails when it stops being true.
-        protocol = (MODULE.parents[3] / "docs" / "protocol.md").read_text()
+        protocol = (MODULE.parents[3] / "docs" / "protocol.md").read_text(encoding="utf-8")
         documented_tools = set(re.findall(r"`(room_[a-z_]+)`", protocol))
         implemented_tools = {tool["name"] for tool in room.tool_definitions()}
         self.assertEqual(implemented_tools - documented_tools, set(), "undocumented MCP tools")
@@ -370,7 +370,7 @@ class RoomTests(unittest.TestCase):
         # Several versions of this script share one database on a machine. A positional
         # INSERT couples every writer to the exact column count, so the next added column
         # breaks whichever versions are not upgraded in the same instant.
-        offenders = re.findall(r"INSERT (?:OR [A-Z]+ )?INTO (\w+) VALUES", MODULE.read_text())
+        offenders = re.findall(r"INSERT (?:OR [A-Z]+ )?INTO (\w+) VALUES", MODULE.read_text(encoding="utf-8"))
         self.assertEqual(offenders, [], f"name the columns for: {sorted(set(offenders))}")
 
     def test_a_previous_version_can_still_write_presence(self):
@@ -544,7 +544,7 @@ class RoomTests(unittest.TestCase):
         Prose cannot be generated from the program the way the site is, but it can at least
         be held to the command surface, which is the part that goes stale silently.
         """
-        readme = (MODULE.parents[3] / "README.md").read_text()
+        readme = (MODULE.parents[3] / "README.md").read_text(encoding="utf-8")
         implemented = set(room.parser()._subparsers._group_actions[0].choices)
         # Anchored so `pipx inject chat-room sqlalchemy` is not read as a subcommand:
         # either the start of a line in a shell block, or inline code.
@@ -560,7 +560,7 @@ class RoomTests(unittest.TestCase):
         """
         import fnmatch
         plugin = MODULE.parents[1]
-        pyproject = (MODULE.parents[3] / "pyproject.toml").read_text()
+        pyproject = (MODULE.parents[3] / "pyproject.toml").read_text(encoding="utf-8")
         block = re.search(r"chat_room = \[(.*?)\]", pyproject, re.S)
         self.assertIsNotNone(block, "pyproject.toml declares no package data for chat_room")
         patterns = re.findall(r'"([^"]+)"', block.group(1))
