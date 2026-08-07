@@ -431,6 +431,41 @@ class RoomTests(unittest.TestCase):
         self.assertNotIn("stale_worktree_days", notification)
         self.assertEqual(notification[room.KEY_STALE_WORKTREE_DAYS], "14", "a stranded value was dropped instead of carried")
 
+    def test_an_actor_is_a_row_in_a_table_not_a_branch_in_the_code(self):
+        """Adding a CLI should be data. Every actor has to answer the same questions."""
+        self.assertTrue(room.ACTOR_TYPES)
+        for name, shape in room.ACTORS.items():
+            with self.subTest(actor=name):
+                self.assertEqual(room.slug(name), name, "an actor name is used as an option key")
+                for field in ("new", "resume", "session_before_prompt", "image_flag", "wakes_in_place"):
+                    self.assertIn(field, shape, f"{name} does not answer {field}")
+                self.assertTrue(shape["new"] and shape["resume"])
+        with self.assertRaises(room.RoomError) as refused:
+            room.actor("emacs")
+        self.assertIn("use one of", str(refused.exception))
+        self.assertEqual(room.actor_of("codex:lane"), "codex")
+        self.assertEqual(room.actor_of("cli:lane"), "", "a non-actor role must not name an actor")
+
+    def test_every_actor_builds_a_turn_the_same_way(self):
+        """The command is derived from the table, so no actor is privileged in the code."""
+        seen = {}
+        class Fake:
+            pid = 1
+            def __init__(self): self.stdin = io.BytesIO()
+        for name in room.ACTOR_TYPES:
+            with tempfile.TemporaryDirectory() as temp, \
+                 mock.patch.object(room.shutil, "which", return_value=f"/usr/local/bin/{name}"), \
+                 mock.patch.object(room.subprocess, "Popen", return_value=mock.Mock(pid=1, stdin=io.BytesIO())) as popen:
+                room.spawn_cli_turn(Path(temp), name, Path(temp), "do the thing", "session-42")
+                seen[name] = popen.call_args[0][0]
+        for name, command in seen.items():
+            with self.subTest(actor=name):
+                self.assertIn("session-42", command, f"{name} was not resumed into its session")
+                self.assertNotIn("do the thing", " ".join(command), "the prompt must stay off the process table")
+        # The asymmetry is the vendor's, and it is recorded rather than hardcoded.
+        self.assertTrue(room.ACTORS["codex"]["wakes_in_place"])
+        self.assertFalse(room.ACTORS["claude"]["wakes_in_place"])
+
     def test_the_room_imports_nothing_outside_the_standard_library(self):
         # `pipx install chat-room` resolving zero wheels is a property, not an accident.
         tree = ast.parse(MODULE.read_text(encoding="utf-8"))

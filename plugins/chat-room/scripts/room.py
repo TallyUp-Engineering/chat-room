@@ -35,6 +35,45 @@ DATA_ENV = "CHAT_ROOM_DATA"
 # Only these are ever written. Eight further kinds shipped unused, which made the enum a
 # menu nobody chose from rather than a vocabulary that meant anything.
 MESSAGE_KINDS = ("message", "allocation", "handoff")
+# What an actor is, rather than which actors there are. Everything that used to ask "is
+# this codex?" asks the table instead, so a third CLI is a row here and nothing else.
+#
+# `wakes_in_place` is the only real asymmetry between them, and it is a fact about the
+# vendor rather than a preference: Codex's app-server accepts a turn over a socket it
+# opened, and a Claude Code process holds no socket at all — verified with lsof against
+# live sessions on a developer machine. A room cannot invent a channel a process does not
+# expose, so the table records which have one and the rest of the program stops guessing.
+ACTORS: Dict[str, Dict[str, Any]] = {
+    "codex": {
+        "new": ["exec"],
+        "resume": ["exec", "resume", "--all"],
+        "session_before_prompt": True,
+        "image_flag": "--image",
+        "wakes_in_place": True,
+    },
+    "claude": {
+        "new": ["--print"],
+        "resume": ["--print", "--resume"],
+        "session_before_prompt": False,
+        "image_flag": None,
+        "wakes_in_place": False,
+    },
+}
+ACTOR_TYPES = tuple(ACTORS)
+
+
+def actor(name: str) -> Dict[str, Any]:
+    settled = str(name or "").strip().lower()
+    if settled not in ACTORS:
+        raise RoomError(f"unsupported actor {name!r}; use one of: {', '.join(ACTOR_TYPES)}")
+    return ACTORS[settled]
+
+
+def actor_of(role: str) -> str:
+    """The actor type a presence role names, or an empty string when it names none."""
+    kind = str(role or "").split(":")[0].strip().lower()
+    return kind if kind in ACTORS else ""
+
 CONTEXT_EVENTS = ("SessionStart", "UserPromptSubmit", "SubagentStart")
 # Where a session comes to rest. A tag that arrives while it is working has nowhere to go
 # until this fires: nothing outside a process can reach it once it is parked at a prompt.
@@ -613,7 +652,7 @@ def coordination_alerts(targets: Dict[str, Any], threads: Sequence[Dict[str, Any
 
 def client_name() -> str:
     value = os.environ.get(CLIENT_ENV, "codex").strip().lower()
-    return value if value in ("codex", "claude", "human") else "agent"
+    return value if value in ACTORS or value == "human" else "agent"
 
 
 def find_cli_executable(name: str) -> Optional[str]:
@@ -731,10 +770,10 @@ def chat_delivery_state(summary: Dict[str, Any], members: Sequence[Dict[str, Any
         return {"ready": False, "mode": "running", "label": "Agent is responding", "detail": "This conversation refreshes as the active agent responds."}
     if member:
         endpoint = str(member.get("wake_endpoint") or "")
-        if client == "codex" and member.get("last_event") == "Stop" and endpoint and socket_ready(endpoint):
+        if client in ACTORS and ACTORS[client]["wakes_in_place"] and member.get("last_event") == "Stop" and endpoint and socket_ready(endpoint):
             return {"ready": True, "mode": "live", "label": "Ready to message", "detail": "Sends through this conversation's existing local connection."}
         return {"ready": False, "mode": "active-unattached", "label": "Active elsewhere", "detail": "This conversation already has an active writer, so it stays view-only here to prevent competing turns."}
-    executable = find_cli_executable("codex" if client == "codex" else "claude" if client == "claude" else "")
+    executable = find_cli_executable(client if client in ACTORS else "")
     if executable:
         return {"ready": True, "mode": "resume", "label": "Ready to continue", "detail": f"Starts one local {summary['client']} turn in this stored conversation with its normal configuration and safety rules."}
     return {"ready": False, "mode": "unavailable", "label": "View only", "detail": f"No local {summary.get('client') or 'vendor'} conversation adapter is available on this machine."}
@@ -747,22 +786,21 @@ def spawn_cli_turn(data_dir: Path, client: str, worktree: Path, body: str, sessi
     process table. Ordinary vendor configuration and sandbox rules still apply.
     """
     normalized = client.strip().lower()
-    executable = find_cli_executable(normalized if normalized in ("codex", "claude") else "")
+    shape = actor(normalized)
+    executable = find_cli_executable(normalized)
     if not executable:
         raise RoomError(f"the {client} CLI is not installed on this machine")
-    if normalized == "codex":
-        command = [executable, "exec"] + (["resume", "--all"] if session_id else [])
+    command = [executable, *(shape["resume"] if session_id else shape["new"])]
+    if shape["image_flag"]:
         for path in images:
-            command.extend(["--image", str(path)])
-        if session_id:
-            command.append(session_id)
+            command.extend([shape["image_flag"], str(path)])
+    elif images:
+        # No flag for it, so the paths travel in the prompt where the actor can still read them.
+        body += "\n\nAttached local image files:\n" + "\n".join(f"- {path}" for path in images) + "\nUse these images as part of the request."
+    if session_id:
+        command.append(session_id)
+    if shape["session_before_prompt"]:
         command.append("-")
-    elif normalized == "claude":
-        command = [executable, "--print"] + (["--resume", session_id] if session_id else [])
-        if images:
-            body += "\n\nAttached local image files:\n" + "\n".join(f"- {path}" for path in images) + "\nUse these images as part of the request."
-    else:
-        raise RoomError("unsupported chat client")
     logs = data_dir / "chat-deliveries"
     logs.mkdir(parents=True, exist_ok=True)
     log_path = logs / f"{normalized}-{slug(session_id or 'new-session', 'session')}.log"
@@ -811,8 +849,7 @@ def start_session(data_dir: Path, repo: Repository, client: str, worktree_value:
     """Open new agent work in a chosen worktree without a terminal."""
     body = ensure_value_free(prompt)
     normalized = client.strip().lower()
-    if normalized not in ("codex", "claude"):
-        raise RoomError("agent client must be codex or claude")
+    actor(normalized)
     worktree = Path(worktree_value).expanduser().resolve() if worktree_value else repo.worktree
     if not worktree.is_dir():
         raise RoomError("worktree path does not exist")
@@ -1073,7 +1110,9 @@ class RoomStore:
             endpoint_live = bool(value.get("wake_endpoint") and socket_ready(str(value["wake_endpoint"])))
             value["target"] = "@" + str(value.get("handle") or "agent")
             value["worktree_target"] = worktree_target(Path(value["worktree"]))
-            value["wakeable_idle"] = bool(value["state"] in ("online", "idle") and endpoint_live and value.get("last_event") == "Stop" and str(value.get("role", "")).startswith("codex:"))
+            kind = actor_of(str(value.get("role") or ""))
+            value["actor"] = kind
+            value["wakeable_idle"] = bool(value["state"] in ("online", "idle") and endpoint_live and value.get("last_event") == "Stop" and kind and ACTORS[kind]["wakes_in_place"])
             result.append(value)
         return result
 
@@ -1460,7 +1499,7 @@ class RoomStore:
                 continue
             session_id = str(member.get("session_id") or "")
             client = str(member.get("role") or "").split(":")[0]
-            if not session_id or client not in ("codex", "claude"):
+            if not session_id or client not in ACTORS:
                 continue
             if message.get("session_id") == session_id or running_delivery(client, session_id):
                 continue
@@ -1583,7 +1622,7 @@ def run_hook(data_dir: Path) -> int:
     state = "offline" if event in ("SessionEnd", "SubagentStop") else "online"
     try:
         with RoomStore(data_dir) as store:
-            store.upsert_presence(repo, participant, session_id, agent_id, role, state, event, os.environ.get(WAKE_ENDPOINT_ENV) if client_name() == "codex" else None)
+            store.upsert_presence(repo, participant, session_id, agent_id, role, state, event, os.environ.get(WAKE_ENDPOINT_ENV) if ACTORS.get(client_name(), {}).get("wakes_in_place") else None)
             context = compact_context(store, repo, participant, event) if event in CONTEXT_EVENTS else ""
             denials = refusals(store, repo, participant) if event == "PreToolUse" else []
             pending = ""
@@ -1613,8 +1652,8 @@ def tool_definitions() -> List[Dict[str, Any]]:
         {"name": "room_thread_close", "description": "Mark a coordination thread resolved without changing Git state.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "thread_id": {"type": "string"}}, "required": ["thread_id"]}},
         {"name": "room_identify", "description": "Assign an active session a semantic @handle.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "session_id": {"type": "string"}, "handle": {"type": "string"}}, "required": ["session_id", "handle"]}},
         {"name": "room_post", "description": "Post one value-free coordination message. Use thread_id for central routing, or tag active @handles and #worktrees ad hoc.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "sender": {"type": "string"}, "session_id": {"type": "string"}, "thread_id": {"type": "string"}, "recipients": {"type": "array", "items": {"type": "string"}}, "kind": {"type": "string", "enum": list(MESSAGE_KINDS)}, "topic": {"type": "string"}, "status": {"type": "string"}, "message": {"type": "string", "maxLength": 4000}}, "required": ["kind", "topic", "message"]}},
-        {"name": "room_session_start", "description": "Open new agent work in a worktree of this project. Starts one local vendor CLI session; that session bills vendor tokens.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "client": {"type": "string", "enum": ["claude", "codex"]}, "worktree": {"type": "string", "description": "Absolute worktree path; defaults to the current one."}, "prompt": {"type": "string", "maxLength": 4000}}, "required": ["client", "prompt"]}},
-        {"name": "room_session_stop", "description": "Interrupt a local turn this room started for a session.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "client": {"type": "string", "enum": ["claude", "codex"]}, "session_id": {"type": "string"}}, "required": ["client", "session_id"]}},
+        {"name": "room_session_start", "description": "Open new agent work in a worktree of this project. Starts one local vendor CLI session; that session bills vendor tokens.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "client": {"type": "string", "enum": list(ACTOR_TYPES)}, "worktree": {"type": "string", "description": "Absolute worktree path; defaults to the current one."}, "prompt": {"type": "string", "maxLength": 4000}}, "required": ["client", "prompt"]}},
+        {"name": "room_session_stop", "description": "Interrupt a local turn this room started for a session.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "client": {"type": "string", "enum": list(ACTOR_TYPES)}, "session_id": {"type": "string"}}, "required": ["client", "session_id"]}},
         {"name": "room_ready", "description": "Report which worktree branches merge cleanly into the integration branch and which collide, before a merge is attempted.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "into": {"type": "string", "description": "Integration branch; defaults to main."}}}},
         {"name": "room_projects", "description": "List every project with a room on this machine, with its worktrees and active agents grouped under it.", "inputSchema": {"type": "object", "properties": {"cwd": cwd}}},
         {"name": "room_spend", "description": "Report token spend per worktree beside the commits it produced, so cost is comparable rather than raw.", "inputSchema": {"type": "object", "properties": {"cwd": cwd, "days": {"type": "integer", "minimum": 1, "maximum": 90}}}},
@@ -1993,9 +2032,9 @@ def parser() -> argparse.ArgumentParser:
         if name == "read": command.add_argument("--after-id", type=int, default=0); command.add_argument("--limit", type=int, default=50)
         if name == "chat": command.add_argument("--sender", default="@human")
     post = sub.add_parser("post"); post.add_argument("--cwd"); post.add_argument("--sender", default="@human"); post.add_argument("--kind", choices=MESSAGE_KINDS, default="message"); post.add_argument("--topic", default="general"); post.add_argument("--status", default="posted"); post.add_argument("--recipient", action="append", default=[]); post.add_argument("--message", required=True)
-    start = sub.add_parser("start"); start.add_argument("--cwd"); start.add_argument("--client", choices=("claude", "codex"), required=True); start.add_argument("--worktree"); start.add_argument("--prompt", required=True)
-    stop = sub.add_parser("stop"); stop.add_argument("--cwd"); stop.add_argument("--client", choices=("claude", "codex"), required=True); stop.add_argument("--session", required=True)
-    send = sub.add_parser("send"); send.add_argument("--cwd"); send.add_argument("--client", choices=("claude", "codex"), required=True); send.add_argument("--session", required=True); send.add_argument("--message", default=""); send.add_argument("--image", action="append", default=[])
+    start = sub.add_parser("start"); start.add_argument("--cwd"); start.add_argument("--client", choices=ACTOR_TYPES, required=True); start.add_argument("--worktree"); start.add_argument("--prompt", required=True)
+    stop = sub.add_parser("stop"); stop.add_argument("--cwd"); stop.add_argument("--client", choices=ACTOR_TYPES, required=True); stop.add_argument("--session", required=True)
+    send = sub.add_parser("send"); send.add_argument("--cwd"); send.add_argument("--client", choices=ACTOR_TYPES, required=True); send.add_argument("--session", required=True); send.add_argument("--message", default=""); send.add_argument("--image", action="append", default=[])
     rename = sub.add_parser("rename"); rename.add_argument("--cwd"); rename.add_argument("--kind", choices=("room", "channel", "chat"), required=True); rename.add_argument("--reference", default=""); rename.add_argument("--label", required=True); rename.add_argument("--client", default="")
     search = sub.add_parser("search"); search.add_argument("--cwd"); search.add_argument("--query", required=True); search.add_argument("--limit", type=int, default=100); search.add_argument("--scope", choices=("room", "chats"), default="room")
     index = sub.add_parser("index"); index.add_argument("--cwd")
