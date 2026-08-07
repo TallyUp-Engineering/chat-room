@@ -40,9 +40,8 @@ chat-room = "chat_room.scripts.room:main"
 
 [tool.setuptools]
 # The distributable plugin directory is the package. Mapping it this way means the
-# installed layout matches the repository layout exactly, so `assets/` still resolves
-# from `scripts/room.py` as `parents[1] / "assets"` with no path handling for the
-# installed case — one fewer thing that can be right in a checkout and wrong in a wheel.
+# installed layout matches the repository layout exactly, so nothing needs a second
+# code path for the installed case.
 package-dir = { chat_room = "plugins/chat-room" }
 packages = ["chat_room", "chat_room.scripts"]
 
@@ -51,9 +50,10 @@ version = { attr = "chat_room.scripts.room.VERSION" }
 
 [tool.setuptools.package-data]
 chat_room = [
-  "assets/*",
   "hooks/*.json",
-  "skills/chat-room/*.md",
+  # Every skill directory, not a named one. Naming it is how a skill added later ships
+  # in a checkout and silently misses the wheel.
+  "skills/*/*.md",
   ".mcp.json",
   ".codex-plugin/*.json",
 ]
