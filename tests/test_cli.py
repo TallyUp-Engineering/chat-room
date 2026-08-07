@@ -77,8 +77,9 @@ class CommandTests(unittest.TestCase):
         environment = dict(os.environ)
         if client:
             environment["CHAT_ROOM_CLIENT"] = client
+        head = [] if args[:1] == ("--data-dir",) else ["--data-dir", str(cls.data)]
         return subprocess.run(
-            [sys.executable, str(ROOM), "--data-dir", str(cls.data), *args],
+            [sys.executable, str(ROOM), *head, *args],
             input=stdin, text=True, capture_output=True, timeout=120,
             cwd=str(cwd) if cwd else None, env=environment,
         )
@@ -90,6 +91,29 @@ class CommandTests(unittest.TestCase):
 
     def cli_json(self, *args, **kwargs):
         return json.loads(self.cli(*args, **kwargs).stdout)
+
+    @classmethod
+    def no_background_warming(cls, data_dir):
+        """Turn warming off for a temporary directory before anything can spawn one.
+
+        Waiting for a warmer to finish cannot be done by watching its lock disappear: the
+        parent returns before the child has created it, so the wait sees nothing and the
+        directory is removed while the child is still starting. Tests that are not about
+        warming say so up front instead.
+        """
+        cls.run_cli("--data-dir", str(data_dir), "option-set", "--cwd", str(cls.proj),
+                    "--namespace", "warm", "--key", "in-background", "--value", "off")
+
+    @staticmethod
+    def settle_warmers(data_dir, timeout=120):
+        """Wait for a warmer to report a result, which is the only signal it has finished."""
+        log = Path(data_dir) / "warm.log"
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if log.exists() and "warmed" in log.read_text(encoding="utf-8", errors="replace"):
+                return
+            time.sleep(0.25)
+        raise AssertionError(f"no warmer reported a result in {data_dir}")
 
     # --- the regression this file exists for ---------------------------------
 
@@ -136,6 +160,7 @@ class CommandTests(unittest.TestCase):
         misses a collision. It used to render the conflict threads without running the scan
         that creates them, so a room where nobody had run `threads` first showed nothing."""
         with tempfile.TemporaryDirectory() as fresh:
+            self.no_background_warming(fresh)
             done = subprocess.run([sys.executable, str(ROOM), "--data-dir", fresh, "board", "--cwd", str(self.proj)],
                                   text=True, capture_output=True, timeout=120)
             self.assertEqual(done.returncode, 0, done.stderr)
@@ -144,6 +169,7 @@ class CommandTests(unittest.TestCase):
     def test_warming_fills_the_memo_and_only_one_may_run(self):
         """`ready` is slow exactly once. This is the command that spends that once."""
         with tempfile.TemporaryDirectory() as fresh:
+            self.no_background_warming(fresh)  # this test drives the warmer itself
             warmed = subprocess.run([sys.executable, str(ROOM), "--data-dir", fresh, "warm", "--cwd", str(self.proj), "--into", "main"],
                                     text=True, capture_output=True, timeout=180)
             self.assertEqual(warmed.returncode, 0, warmed.stderr)
@@ -170,10 +196,7 @@ class CommandTests(unittest.TestCase):
             self.assertIn("warming the merge memo", first.stderr, "a cold room warmed silently, or not at all")
             self.assertIn("BACKLOG", first.stdout, "the human was made to wait for the warm")
             # Whatever the warmer did, it must not have been on the human's clock.
-            for _ in range(60):
-                if not list(Path(fresh).glob("warm-*.lock")):
-                    break
-                time.sleep(0.5)
+            self.settle_warmers(fresh)
             log = Path(fresh) / "warm.log"
             self.assertTrue(log.exists(), "a detached warmer left nothing a person could read")
 
