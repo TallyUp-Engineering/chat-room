@@ -321,27 +321,33 @@ class RoomTests(unittest.TestCase):
                 "source": str(source),
             }
             engine = CHAT_INDEX.build_engine(Path(temp))
-            self.assertEqual(CHAT_INDEX.backfill(engine, [transcript]), {"indexed": 1, "skipped": 0})
-            # An unchanged source is never re-read.
-            self.assertEqual(CHAT_INDEX.backfill(engine, [transcript]), {"indexed": 0, "skipped": 1})
+            # Windows will not remove a directory whose file is still open, and the
+            # connection pool holds it until the engine is disposed. This has to happen
+            # before the temporary directory is removed, so it cannot be an addCleanup.
+            try:
+                self.assertEqual(CHAT_INDEX.backfill(engine, [transcript]), {"indexed": 1, "skipped": 0})
+                # An unchanged source is never re-read.
+                self.assertEqual(CHAT_INDEX.backfill(engine, [transcript]), {"indexed": 0, "skipped": 1})
 
-            counts = CHAT_INDEX.summary(engine)
-            self.assertEqual((counts["actors"], counts["chats"], counts["turns"]), (1, 1, 2))
+                counts = CHAT_INDEX.summary(engine)
+                self.assertEqual((counts["actors"], counts["chats"], counts["turns"]), (1, 1, 2))
 
-            found = CHAT_INDEX.search_turns(engine, "merge-tree")
-            self.assertEqual([item["body"] for item in found], ["please run the merge-tree check"])
-            self.assertEqual(found[0]["client"], "claude")
-            self.assertEqual(found[0]["title"], "Rebuild the projection")
-            # A wildcard is matched literally rather than widening the search.
-            self.assertEqual(CHAT_INDEX.search_turns(engine, "%"), [])
-            self.assertEqual(CHAT_INDEX.search_turns(engine, "   "), [])
+                found = CHAT_INDEX.search_turns(engine, "merge-tree")
+                self.assertEqual([item["body"] for item in found], ["please run the merge-tree check"])
+                self.assertEqual(found[0]["client"], "claude")
+                self.assertEqual(found[0]["title"], "Rebuild the projection")
+                # A wildcard is matched literally rather than widening the search.
+                self.assertEqual(CHAT_INDEX.search_turns(engine, "%"), [])
+                self.assertEqual(CHAT_INDEX.search_turns(engine, "   "), [])
 
-            # A rewritten transcript must not leave stale turns behind.
-            source.write_text("placeholder rewritten\n")
-            transcript["messages"] = [{"role": "user", "body": "different question", "timestamp": "2026-08-06T20:00:00Z"}]
-            self.assertEqual(CHAT_INDEX.backfill(engine, [transcript]), {"indexed": 1, "skipped": 0})
-            self.assertEqual(CHAT_INDEX.summary(engine)["turns"], 1)
-            self.assertEqual(CHAT_INDEX.search_turns(engine, "merge-tree"), [])
+                # A rewritten transcript must not leave stale turns behind.
+                source.write_text("placeholder rewritten\n")
+                transcript["messages"] = [{"role": "user", "body": "different question", "timestamp": "2026-08-06T20:00:00Z"}]
+                self.assertEqual(CHAT_INDEX.backfill(engine, [transcript]), {"indexed": 1, "skipped": 0})
+                self.assertEqual(CHAT_INDEX.summary(engine)["turns"], 1)
+                self.assertEqual(CHAT_INDEX.search_turns(engine, "merge-tree"), [])
+            finally:
+                engine.dispose()
 
     @unittest.skipUnless(CHAT_INDEX, "optional transcript index not installed")
     def test_index_reports_an_unreachable_store_without_a_traceback(self):
@@ -355,7 +361,7 @@ class RoomTests(unittest.TestCase):
     def test_the_protocol_document_matches_the_code(self):
         # The contract drifted once already: the document advertised seven tools when
         # there were fifteen. It is only a contract if it fails when it stops being true.
-        protocol = (MODULE.parents[3] / "docs" / "protocol.md").read_text()
+        protocol = (MODULE.parents[3] / "docs" / "protocol.md").read_text(encoding="utf-8")
         documented_tools = set(re.findall(r"`(room_[a-z_]+)`", protocol))
         implemented_tools = {tool["name"] for tool in room.tool_definitions()}
         self.assertEqual(implemented_tools - documented_tools, set(), "undocumented MCP tools")
@@ -370,7 +376,7 @@ class RoomTests(unittest.TestCase):
         # Several versions of this script share one database on a machine. A positional
         # INSERT couples every writer to the exact column count, so the next added column
         # breaks whichever versions are not upgraded in the same instant.
-        offenders = re.findall(r"INSERT (?:OR [A-Z]+ )?INTO (\w+) VALUES", MODULE.read_text())
+        offenders = re.findall(r"INSERT (?:OR [A-Z]+ )?INTO (\w+) VALUES", MODULE.read_text(encoding="utf-8"))
         self.assertEqual(offenders, [], f"name the columns for: {sorted(set(offenders))}")
 
     def test_a_previous_version_can_still_write_presence(self):
@@ -538,6 +544,20 @@ class RoomTests(unittest.TestCase):
                 history = room.chat_transcript(repo, "Codex", "session-all")
             self.assertEqual(len(history["messages"]), 1005)
 
+    def test_the_readme_only_promises_commands_that_exist(self):
+        """The README described the browser room for a release after it was deleted.
+
+        Prose cannot be generated from the program the way the site is, but it can at least
+        be held to the command surface, which is the part that goes stale silently.
+        """
+        readme = (MODULE.parents[3] / "README.md").read_text(encoding="utf-8")
+        implemented = set(room.parser()._subparsers._group_actions[0].choices)
+        # Anchored so `pipx inject chat-room sqlalchemy` is not read as a subcommand:
+        # either the start of a line in a shell block, or inline code.
+        promised = set(re.findall(r"(?m)^chat-room ([a-z][a-z-]*)", readme)) | set(re.findall(r"`chat-room ([a-z][a-z-]*)", readme))
+        self.assertTrue(promised)
+        self.assertEqual(promised - implemented, set(), "README promises commands that do not exist")
+
     def test_every_shipped_file_is_covered_by_the_package_data_globs(self):
         """A named glob ships in a checkout and silently misses the wheel.
 
@@ -546,7 +566,7 @@ class RoomTests(unittest.TestCase):
         """
         import fnmatch
         plugin = MODULE.parents[1]
-        pyproject = (MODULE.parents[3] / "pyproject.toml").read_text()
+        pyproject = (MODULE.parents[3] / "pyproject.toml").read_text(encoding="utf-8")
         block = re.search(r"chat_room = \[(.*?)\]", pyproject, re.S)
         self.assertIsNotNone(block, "pyproject.toml declares no package data for chat_room")
         patterns = re.findall(r'"([^"]+)"', block.group(1))
@@ -556,6 +576,75 @@ class RoomTests(unittest.TestCase):
             relative = path.relative_to(plugin).as_posix()
             self.assertTrue(any(fnmatch.fnmatch(relative, pattern) for pattern in patterns),
                             f"{relative} ships in a checkout but matches no package-data pattern")
+
+    def test_a_card_lands_in_the_column_its_state_implies(self):
+        repo = self.repo()
+        worktrees = [{"target": "#lane", "name": "lane", "path": str(repo.worktree), "branch": "lane"},
+                     {"target": "#old", "name": "old", "path": "/project/old", "branch": "old"}]
+        with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store, mock.patch.object(room, "list_worktree_references", return_value=worktrees):
+            store.upsert_presence(repo, "s:1", "one", None, "claude:lane", "online", "SessionStart")
+            store.claim_handle(repo, "one", "api-agent")
+            store.open_thread(repo, "Rebuild the projection", "coordination", "@human", ["@api-agent"], [])
+            store.open_thread(repo, "Choose navigation", "design direction", "@human", ["@human"], [], metadata={"audience": "human-loop"})
+            store.open_thread(repo, "Sweep stale lanes", "coordination", "@human", ["#old"], [])
+            done = store.open_thread(repo, "Remove the browser room", "handoff", "@human", ["@api-agent"], [])
+            store.close_thread(repo, done["id"])
+            board = store.board(repo)
+        self.assertEqual(board["counts"], {"backlog": 1, "doing": 1, "blocked": 1, "done": 1})
+        self.assertEqual(board["columns"]["doing"][0]["owners"], ["@api-agent"])
+        # Nobody declares a column; it follows from who is active and what waits on a human.
+        self.assertEqual(board["columns"]["backlog"][0]["title"], "Sweep stale lanes")
+        self.assertEqual(board["columns"]["blocked"][0]["title"], "Choose navigation")
+
+    def test_the_board_renders_every_card_in_its_column(self):
+        board = {"room_id": "r", "counts": {}, "columns": {
+            "backlog": [{"title": "Sweep stale lanes", "reason": "coordination", "owners": []}],
+            "doing": [{"title": "Rebuild the projection", "reason": "coordination", "owners": ["@api-agent"]}],
+            "blocked": [{"title": "Choose navigation", "reason": "design direction", "owners": []}],
+            "done": [],
+        }}
+        text = room.render_board(board, width=104)
+        self.assertIn("BACKLOG (1)", text)
+        self.assertIn("DONE (0)", text)
+        self.assertIn("@api-agent", text)
+        self.assertIn("waiting on @human", text)
+        self.assertIn("—", text)  # an empty column still holds its place
+
+    def test_only_a_refused_rule_denies_a_write(self):
+        repo = self.repo()
+        with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store:
+            store.upsert_presence(repo, "mine", "one", None, "claude:lane", "online", "SessionStart")
+            store.upsert_presence(repo, "theirs", "two", None, "codex:lane", "online", "SessionStart")
+            # Advisory by default: two actors in one worktree is reported, never blocked.
+            self.assertEqual(room.refusals(store, repo, "mine"), [])
+            store.set_option("rules", "one-actor-per-worktree", "refuse")
+            reasons = room.refusals(store, repo, "mine")
+            self.assertEqual(len(reasons), 1)
+            self.assertIn("refuse", reasons[0])
+            self.assertIn("#lane", reasons[0])
+            # A session never refuses its own write, and an empty room refuses nothing.
+            store.upsert_presence(repo, "theirs", "two", None, "codex:lane", "offline", "SessionEnd")
+            self.assertEqual(room.refusals(store, repo, "mine"), [])
+
+    def test_a_denial_is_only_ever_emitted_for_pretooluse(self):
+        denial = room.hook_output("PreToolUse", "", ["one-actor-per-worktree is set to refuse."])
+        self.assertEqual(denial["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertTrue(denial["continue"])
+        # Context injection and denial never travel together.
+        self.assertNotIn("additionalContext", denial["hookSpecificOutput"])
+        quiet = room.hook_output("SessionStart", "room context")
+        self.assertNotIn("permissionDecision", quiet.get("hookSpecificOutput", {}))
+
+    def test_the_hook_fails_open_when_the_room_is_unreadable(self):
+        # A broken room must never be able to stop work.
+        with tempfile.TemporaryDirectory() as temp:
+            (Path(temp) / "chat-room.sqlite3").write_text("not a database")
+            payload = json.dumps({"hook_event_name": "PreToolUse", "cwd": str(Path(temp)), "session_id": "a"})
+            with mock.patch("sys.stdin", io.StringIO(payload)), mock.patch("sys.stdout", io.StringIO()) as out:
+                self.assertEqual(room.run_hook(Path(temp)), 0)
+            answer = json.loads(out.getvalue())
+        self.assertTrue(answer["continue"])
+        self.assertNotIn("permissionDecision", json.dumps(answer))
 
     def test_a_rule_nobody_set_reports_its_default_as_undecided(self):
         # The difference between a default and an answer is what lets an interrogation

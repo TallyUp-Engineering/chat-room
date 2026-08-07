@@ -1,12 +1,100 @@
 {
   "description": "Join Codex sessions to a project-local advisory Chat Room.",
   "hooks": {
-    "SessionStart": [{"matcher":"startup|resume|clear|compact","hooks":[{"type":"command","command":"/usr/bin/python3 \"$PLUGIN_ROOT/scripts/room.py\" hook","timeout":5,"statusMessage":"Joining Chat Room","additionalContextLimit":2200}]}],
-    "UserPromptSubmit": [{"hooks":[{"type":"command","command":"/usr/bin/python3 \"$PLUGIN_ROOT/scripts/room.py\" hook","timeout":3,"additionalContextLimit":1800}]}],
-    "PostToolUse": [{"hooks":[{"type":"command","command":"/usr/bin/python3 \"$PLUGIN_ROOT/scripts/room.py\" hook","timeout":3,"additionalContextLimit":1800}]}],
-    "SubagentStart": [{"hooks":[{"type":"command","command":"/usr/bin/python3 \"$PLUGIN_ROOT/scripts/room.py\" hook","timeout":3,"additionalContextLimit":1600}]}],
-    "SubagentStop": [{"hooks":[{"type":"command","command":"/usr/bin/python3 \"$PLUGIN_ROOT/scripts/room.py\" hook","timeout":3}]}],
-    "Stop": [{"hooks":[{"type":"command","command":"/usr/bin/python3 \"$PLUGIN_ROOT/scripts/room.py\" hook","timeout":3}]}],
-    "SessionEnd": [{"hooks":[{"type":"command","command":"/usr/bin/python3 \"$PLUGIN_ROOT/scripts/room.py\" hook","timeout":3}]}]
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$PLUGIN_ROOT/scripts/room.py\" hook",
+            "timeout": 5,
+            "statusMessage": "Joining Chat Room",
+            "additionalContextLimit": 2200
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$PLUGIN_ROOT/scripts/room.py\" hook",
+            "timeout": 3,
+            "additionalContextLimit": 1800
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$PLUGIN_ROOT/scripts/room.py\" hook",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$PLUGIN_ROOT/scripts/room.py\" hook",
+            "timeout": 3,
+            "additionalContextLimit": 1800
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$PLUGIN_ROOT/scripts/room.py\" hook",
+            "timeout": 3,
+            "additionalContextLimit": 1600
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$PLUGIN_ROOT/scripts/room.py\" hook",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$PLUGIN_ROOT/scripts/room.py\" hook",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$PLUGIN_ROOT/scripts/room.py\" hook",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
   }
 }

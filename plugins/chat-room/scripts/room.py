@@ -26,7 +26,7 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
 
 PLUGIN_NAME = "chat-room"
-VERSION = "0.7.1"
+VERSION = "0.8.0"
 SCHEMA_VERSION = 6
 ACTIVE_WINDOW_SECONDS = 30 * 60
 WAKE_ENDPOINT_ENV = "CHAT_ROOM_WAKE_ENDPOINT"
@@ -65,6 +65,9 @@ MAX_CONFLICT_PROBES = 40
 # `refuse` is binding on every agent that reads its injected context, which is how a hard
 # rule travels today. It is not mechanically blocked; `chat-room rules` says so plainly
 # rather than implying a guarantee the room cannot make.
+# A card's column is derived, never stored: `blocked` means waiting on a human,
+# `doing` means someone active is a participant, `backlog` means nobody is.
+BOARD_COLUMNS = ("backlog", "doing", "blocked", "done")
 RULE_RUNGS = ("off", "advise", "warn", "refuse")
 RULE_SEVERITY = {"advise": "warning", "warn": "attention", "refuse": "critical"}
 STALE_WORKTREE_DAYS = 30
@@ -1160,6 +1163,41 @@ class RoomStore:
             result.append(value)
         return result
 
+    def board(self, repo: Repository) -> Dict[str, Any]:
+        """Coordination work as columns, derived rather than declared.
+
+        There is no board table and no status field to keep in sync. A thread is already
+        a card: it has a title, participants, paths, and a status. Which column it sits in
+        follows from what the room can observe — whether anyone active is on it, and
+        whether it is waiting on a human — so a worker moves a card by doing the work,
+        never by remembering to update it.
+        """
+        active: Set[str] = set()
+        for member in self.members(repo.room_id):
+            if str(member.get("state") or "") == "offline":
+                continue
+            active.update({str(member.get("target") or ""), str(member.get("worktree_target") or "")})
+        active.discard("")
+
+        columns: Dict[str, List[Dict[str, Any]]] = {name: [] for name in BOARD_COLUMNS}
+        for thread in self.threads(repo, include_resolved=True):
+            owners = sorted(set(thread["participants"]).intersection(active))
+            if thread["status"] != "open":
+                column = "done"
+            elif thread["audience"] == "human-loop":
+                # Waiting on a person is the one blocker the room can see for itself.
+                column = "blocked"
+            elif owners:
+                column = "doing"
+            else:
+                column = "backlog"
+            columns[column].append({
+                "id": thread["id"], "title": thread["title"], "reason": thread["reason"],
+                "participants": thread["participants"], "owners": owners, "paths": thread["paths"],
+                "lifetime": thread["lifetime"], "status": thread["status"], "updated_at": thread["updated_at"],
+            })
+        return {"room_id": repo.room_id, "columns": columns, "counts": {name: len(items) for name, items in columns.items()}}
+
     def thread(self, repo: Repository, thread_id: str) -> Dict[str, Any]:
         value = next((item for item in self.threads(repo, True) if item["id"] == thread_id), None)
         if value is None:
@@ -1411,8 +1449,37 @@ def compact_context(store: RoomStore, repo: Repository, participant_id: str, eve
     return "\n".join(lines)
 
 
-def hook_output(event: str, context: str = "") -> Dict[str, Any]:
+def refusals(store: "RoomStore", repo: Repository, participant_id: str) -> List[str]:
+    """House rules at `refuse` that this write would break.
+
+    Only rules answerable from presence are checked here. This runs before every write,
+    so anything that shells out to Git belongs in `chat-room ready`, not on this path.
+    """
+    rules = store.rules()
+    reasons: List[str] = []
+    if rules.get("one-actor-per-worktree", {}).get("rung") == "refuse":
+        others = sorted({
+            str(member["target"]) for member in store.members(repo.room_id)
+            if str(member.get("participant_id")) != participant_id
+            and str(member.get("state")) != "offline"
+            and str(member.get("worktree") or "") == str(repo.worktree)
+        })
+        if others:
+            reasons.append(
+                f"one-actor-per-worktree is set to refuse, and {', '.join(others)} "
+                f"{'is' if len(others) == 1 else 'are'} already active in {worktree_target(repo.worktree)}. "
+                "Settle ownership in the room before writing here."
+            )
+    return reasons
+
+
+def hook_output(event: str, context: str = "", denials: Sequence[str] = ()) -> Dict[str, Any]:
     value: Dict[str, Any] = {"continue": True}
+    if denials:
+        # The only rung that can interrupt a turn, and only when an operator asked for it.
+        reason = "Chat Room refused this write. " + " ".join(denials)
+        value["hookSpecificOutput"] = {"hookEventName": event, "permissionDecision": "deny", "permissionDecisionReason": reason}
+        return value
     if context and event in CONTEXT_EVENTS: value["hookSpecificOutput"] = {"hookEventName": event, "additionalContext": context}
     return value
 
@@ -1429,7 +1496,8 @@ def run_hook(data_dir: Path) -> int:
         with RoomStore(data_dir) as store:
             store.upsert_presence(repo, participant, session_id, agent_id, role, state, event, os.environ.get(WAKE_ENDPOINT_ENV) if client_name() == "codex" else None)
             context = compact_context(store, repo, participant, event) if event in CONTEXT_EVENTS else ""
-        print(json.dumps(hook_output(event, context), separators=(",", ":")))
+            denials = refusals(store, repo, participant) if event == "PreToolUse" else []
+        print(json.dumps(hook_output(event, context, denials), separators=(",", ":")))
     except Exception as error:
         print(json.dumps({"continue": True, "systemMessage": f"Chat Room unavailable: {error}"}))
     return 0
@@ -1736,6 +1804,39 @@ def search_transcripts(data_dir: Path, query: str, limit: int = 50) -> List[Dict
         raise RoomError(str(error)) from error
 
 
+def render_board(board: Dict[str, Any], width: int = 0) -> str:
+    """The board as columns, because a list of statuses is not a board.
+
+    `chat-room threads` already answers this in JSON for anything that parses. This is
+    the human view, and it reads persisted rows only — showing it never touches a worker.
+    """
+    columns = board["columns"]
+    available = width or shutil.get_terminal_size((100, 24)).columns
+    span = max(16, (min(available, 160) - 3 * len(BOARD_COLUMNS)) // len(BOARD_COLUMNS))
+
+    def cell(value: str, indent: int = 0) -> str:
+        room = span - indent
+        text = value if len(value) <= room else value[: max(1, room - 1)] + "…"
+        return " " * indent + text.ljust(room)
+
+    lines = [
+        "   ".join(cell(f"{name.upper()} ({len(columns[name])})") for name in BOARD_COLUMNS),
+        "   ".join(cell("─" * span) for _ in BOARD_COLUMNS),
+    ]
+    stacks: List[List[str]] = []
+    for name in BOARD_COLUMNS:
+        stack: List[str] = []
+        for card in columns[name]:
+            stack.append(cell(card["title"]))
+            detail = ", ".join(card["owners"]) if card["owners"] else ("waiting on @human" if name == "blocked" else card["reason"])
+            stack.append(cell(detail, indent=2))
+            stack.append(cell(""))
+        stacks.append(stack or [cell("—")])
+    for row in range(max(len(stack) for stack in stacks)):
+        lines.append("   ".join(stack[row] if row < len(stack) else cell("") for stack in stacks).rstrip())
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def print_message(item: Dict[str, Any]) -> None:
     targets = " -> " + ",".join(item["recipients"]) if item["recipients"] else ""
     print(f"[{item['id']}] {item['timestamp']} {item['kind'].upper()} {item['sender']}{targets} {item['topic']} [{item['status']}]\n  {item['message']}")
@@ -1780,7 +1881,7 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--version", action="version", version=f"{PLUGIN_NAME} {VERSION} (schema {SCHEMA_VERSION})")
     sub = value.add_subparsers(dest="command", required=True)
     doctor = sub.add_parser("doctor"); doctor.add_argument("--cwd"); doctor.add_argument("--repair", action="store_true")
-    for name in ("status", "targets", "members", "threads", "options", "read", "chat", "alerts", "chats", "rules"):
+    for name in ("status", "targets", "members", "threads", "options", "read", "chat", "alerts", "chats", "rules", "board"):
         command = sub.add_parser(name); command.add_argument("--cwd")
         if name == "read": command.add_argument("--after-id", type=int, default=0); command.add_argument("--limit", type=int, default=50)
         if name == "chat": command.add_argument("--sender", default="@human")
@@ -1829,6 +1930,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             elif args.command == "send": value = start_chat_delivery(args.data_dir, repo, args.client, args.session, args.message, store.members(repo.room_id), chat_images(args.image))
             elif args.command == "rename": value = store.rename(repo, args.kind, args.reference, args.label, args.client)
             elif args.command == "alerts": value = {"room_id": repo.room_id, "alerts": coordination_alerts(store.targets(repo), store.sync_preemptive_conflicts(repo), store.rules())}
+            elif args.command == "board":
+                print(render_board(store.board(repo)), end="")
+                return 0
             elif args.command == "rules": value = {"room_id": repo.room_id, "rungs": list(RULE_RUNGS), "rules": store.rules(), "set_with": "chat-room option-set --namespace rules --key <name> --value <rung>"}
             elif args.command == "chats":
                 chats, _files = discover_chat_catalog(repo)
