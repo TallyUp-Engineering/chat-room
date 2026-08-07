@@ -91,6 +91,18 @@ class CommandTests(unittest.TestCase):
     def cli_json(self, *args, **kwargs):
         return json.loads(self.cli(*args, **kwargs).stdout)
 
+    @staticmethod
+    def settle_warmers(data_dir, timeout=60):
+        """Wait for any background warmer to finish before the directory is removed.
+
+        A detached warmer holds the room database for as long as it runs, and Windows will
+        not remove a directory whose file is open. A real data directory outlives the
+        command, so this is a rule for temporary ones rather than for the program.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline and list(Path(data_dir).glob("warm-*.lock")):
+            time.sleep(0.25)
+
     # --- the regression this file exists for ---------------------------------
 
     def test_a_fresh_process_reports_the_conflict_it_finds(self):
@@ -139,6 +151,7 @@ class CommandTests(unittest.TestCase):
             done = subprocess.run([sys.executable, str(ROOM), "--data-dir", fresh, "board", "--cwd", str(self.proj)],
                                   text=True, capture_output=True, timeout=120)
             self.assertEqual(done.returncode, 0, done.stderr)
+            self.settle_warmers(fresh)
         self.assertIn("Merge conflict", done.stdout, "a first-ever `board` hid a live collision")
 
     def test_warming_fills_the_memo_and_only_one_may_run(self):
@@ -170,10 +183,7 @@ class CommandTests(unittest.TestCase):
             self.assertIn("warming the merge memo", first.stderr, "a cold room warmed silently, or not at all")
             self.assertIn("BACKLOG", first.stdout, "the human was made to wait for the warm")
             # Whatever the warmer did, it must not have been on the human's clock.
-            for _ in range(60):
-                if not list(Path(fresh).glob("warm-*.lock")):
-                    break
-                time.sleep(0.5)
+            self.settle_warmers(fresh)
             log = Path(fresh) / "warm.log"
             self.assertTrue(log.exists(), "a detached warmer left nothing a person could read")
 
