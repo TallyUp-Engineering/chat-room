@@ -514,6 +514,64 @@ class RoomTests(unittest.TestCase):
         self.assertNotIn("detail", verdict)
         self.assertEqual(probe.call_count, pairs + len(worktrees), "one probe per pair, plus one per branch against main")
 
+    def test_only_one_warmer_can_hold_a_room(self):
+        """The claim is the file creation, so two starting together cannot both win.
+
+        The lock is claimed by the warmer and never on its behalf: a parent that wrote it
+        for its child left the child reading its own pid and standing down immediately,
+        which looked exactly like a warmer that had never started.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            self.assertTrue(room.claim_warm_lock(Path(temp), "room-a"))
+            # The holder asking again is not a conflict with itself.
+            self.assertFalse(room.warm_is_running(Path(temp), "room-a"))
+            room.warm_lock_path(Path(temp), "room-a").write_text("999999")
+            self.assertFalse(room.claim_warm_lock(Path(temp), "room-a") if room.warm_is_running(Path(temp), "room-a") else False)
+            # A lock left by a process that is gone must not wedge the room forever.
+            self.assertTrue(room.claim_warm_lock(Path(temp), "room-a"))
+
+    def test_a_warm_is_offered_once_and_only_when_asked_for(self):
+        repo = self.repo()
+        with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store:
+            store.register_room(repo)
+            with mock.patch.object(room, "warm_in_background", return_value=True) as spawn, \
+                 mock.patch("sys.stderr", io.StringIO()) as said:
+                room.offer_warm(Path(temp), repo, store)
+            self.assertEqual(spawn.call_count, 1, "a cold room did not warm")
+            self.assertIn("warming the merge memo", said.getvalue(), "it warmed without saying so")
+
+            # Once the memo has anything in it, this is someone's CPU for nothing.
+            memo = room.merge_memo(Path(temp))
+            try:
+                memo.execute("INSERT INTO merge_probe(left,right,paths_json) VALUES('a','b','[]')")
+                memo.commit()
+            finally:
+                memo.close()
+            with mock.patch.object(room, "warm_in_background", return_value=True) as again:
+                room.offer_warm(Path(temp), repo, store)
+            self.assertEqual(again.call_count, 0, "a warm room warmed again")
+
+    def test_the_operator_can_turn_background_warming_off(self):
+        repo = self.repo()
+        with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store:
+            store.register_room(repo)
+            store.set_option(room.NS_WARM, room.KEY_WARM_IN_BACKGROUND, "off")
+            with mock.patch.object(room, "warm_in_background", return_value=True) as spawn, \
+                 mock.patch("sys.stderr", io.StringIO()):
+                room.offer_warm(Path(temp), repo, store)
+            self.assertEqual(spawn.call_count, 0, "warming ignored the operator")
+
+    def test_progress_says_where_it_is_rather_than_going_quiet(self):
+        with mock.patch("sys.stderr", io.StringIO()) as said:
+            for done in range(1, 11):
+                room.report_progress(done, 10, "checking branch pairs")
+            written = said.getvalue()
+        self.assertIn("checking branch pairs", written)
+        self.assertIn("100%", written)
+        with mock.patch("sys.stderr", io.StringIO()) as empty:
+            room.report_progress(0, 0, "nothing to do")
+        self.assertEqual(empty.getvalue(), "", "it reported progress through no work")
+
     def test_a_merge_answer_is_remembered_against_the_commits_it_compared(self):
         """Whether two commits conflict is fixed, so the answer can be kept forever. The key
         is the pair of commits, which changes the moment either branch moves — that is what
