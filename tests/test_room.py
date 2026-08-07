@@ -1,3 +1,4 @@
+import ast
 import importlib.util
 import io
 import json
@@ -211,6 +212,27 @@ class RoomTests(unittest.TestCase):
         self.assertEqual(found["elsewhere"]["collides_with"], [])
         self.assertEqual((report["clean"], report["latent"], report["conflicted"]), (1, 2, 0))
 
+    def test_a_single_short_lived_process_opens_the_conflict_thread(self):
+        """The regression this replaces: the scan was asynchronous and the sync step returned
+        early unless a scan had already run. Every CLI invocation is a fresh process and so
+        always the first caller, which meant overlaps were detected and then thrown away."""
+        repo = self.repo()
+        worktrees = [
+            {"target": "#lane-one", "name": "lane-one", "path": "/project/one", "branch": "one"},
+            {"target": "#lane-two", "name": "lane-two", "path": "/project/two", "branch": "two"},
+        ]
+        conflicts = [{"path": "app/ui.tsx", "worktrees": worktrees}]
+        room.CONFLICT_SCANS.clear()
+        with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store, \
+             mock.patch.object(room, "list_worktree_references", return_value=worktrees), \
+             mock.patch.object(room, "preemptive_conflicts", return_value=conflicts):
+            # No prior scan in this process, exactly like a fresh `chat-room threads`.
+            threads = store.sync_preemptive_conflicts(repo)
+        opened = [item for item in threads if item["source"] == "preemptive-conflict"]
+        self.assertEqual(len(opened), 1, "a fresh process did not open the conflict thread")
+        self.assertEqual(opened[0]["paths"], ["app/ui.tsx"])
+        room.CONFLICT_SCANS.clear()
+
     def test_only_real_merge_conflicts_are_reported(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "project"
@@ -357,6 +379,94 @@ class RoomTests(unittest.TestCase):
                     CHAT_INDEX.build_engine(Path(temp))
             # The message locates the store without repeating the credentials in it.
             self.assertNotIn("secret", str(unreachable.exception))
+
+    # --- Architecture constraints (docs/architecture.md) --------------------------
+
+    def test_every_architecture_constraint_names_a_test_that_exists(self):
+        """A constraint nobody checks is a preference. Keep the document honest."""
+        doc = (MODULE.parents[3] / "docs" / "architecture.md").read_text(encoding="utf-8")
+        named = set(re.findall(r"`(test_[a-z0-9_]+)`", doc))
+        self.assertGreaterEqual(len(named), 10, "architecture.md lists suspiciously few constraints")
+        defined = set(re.findall(r"def (test_[a-z0-9_]+)", (MODULE.parents[3] / "tests" / "test_room.py").read_text(encoding="utf-8")))
+        self.assertEqual(named - defined, set(), "architecture.md names tests that no longer exist")
+
+    def test_every_named_option_key_survives_slugging(self):
+        """Writes slug the key and reads slug the key, so a literal that is not slug-stable
+        is written to one row and read from another. That is how the seeded delivery policy
+        became unreadable and how the stale threshold silently kept its default."""
+        for key in room.OPTION_KEYS:
+            self.assertEqual(room.slug(key), key, f"option key {key!r} is not slug-stable")
+        for name, *_rest in room.RULE_CATALOG:
+            self.assertEqual(room.slug(name), name, f"rule name {name!r} is not slug-stable")
+
+    def test_a_stranded_option_row_never_outranks_the_one_that_can_be_read(self):
+        """Only the seed ever wrote an unslugged key; `option-set` always slugged.
+
+        So a stranded row is a dead default, and carrying it across must not clobber the
+        value an operator actually set. Where there is nothing to clobber, it carries.
+        """
+        repo = self.repo()
+        with tempfile.TemporaryDirectory() as temp:
+            with room.RoomStore(Path(temp)) as store:
+                store.register_room(repo)
+                store.set_option(room.NS_DELIVERY, room.KEY_WAKE_ON_TAG, "off")   # the operator decided
+                store.connection.execute(                                          # the old dead seed
+                    "INSERT OR REPLACE INTO option_index(namespace,key,value,metadata_json) VALUES(?,?,?,?)",
+                    (room.NS_DELIVERY, "wake_on_tag", "direct", "{}"))
+                store.connection.execute(                                          # stranded with no counterpart
+                    "INSERT OR REPLACE INTO option_index(namespace,key,value,metadata_json) VALUES(?,?,?,?)",
+                    (room.NS_NOTIFICATION, "stale_worktree_days", "14", "{}"))
+                store.connection.commit()
+            with room.RoomStore(Path(temp)) as store:
+                delivery = {item["key"]: item["value"] for item in store.options()[room.NS_DELIVERY]}
+                notification = {item["key"]: item["value"] for item in store.options()[room.NS_NOTIFICATION]}
+                self.assertEqual(store.rules()["stale-worktrees"]["parameter"], 14)
+        self.assertNotIn("wake_on_tag", delivery, "the unreachable row survived")
+        self.assertEqual(delivery[room.KEY_WAKE_ON_TAG], "off", "a dead seed overwrote the operator's choice")
+        self.assertNotIn("stale_worktree_days", notification)
+        self.assertEqual(notification[room.KEY_STALE_WORKTREE_DAYS], "14", "a stranded value was dropped instead of carried")
+
+    def test_the_room_imports_nothing_outside_the_standard_library(self):
+        # `pipx install chat-room` resolving zero wheels is a property, not an accident.
+        tree = ast.parse(MODULE.read_text(encoding="utf-8"))
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                imported.add(node.module.split(".")[0])
+        outside = sorted(imported - sys.stdlib_module_names - {"chat_index"})
+        self.assertEqual(outside, [], "room.py imports third-party modules")
+
+    def test_the_room_never_listens_on_a_socket(self):
+        source = MODULE.read_text(encoding="utf-8")
+        for forbidden in (".listen(", ".bind(", "socketserver", "HTTPServer", "BaseHTTPRequestHandler"):
+            self.assertNotIn(forbidden, source, f"room.py appears to open a listening socket via {forbidden}")
+
+    def test_the_hook_path_never_runs_a_merge_analysis(self):
+        """Context injection runs on every prompt; merge-tree per branch pair does not belong there."""
+        repo = self.repo()
+        seen = []
+        real = room.subprocess.run
+        with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store:
+            store.upsert_presence(repo, "s:1", "one", None, "claude:lane", "online", "SessionStart")
+            with mock.patch.object(room.subprocess, "run", side_effect=lambda cmd, *a, **k: (seen.append(cmd), real(cmd, *a, **k))[1]):
+                room.compact_context(store, repo, "s:1", "UserPromptSubmit")
+        flat = " ".join(" ".join(str(part) for part in cmd) for cmd in seen)
+        self.assertNotIn("merge-tree", flat)
+        self.assertNotIn("--porcelain", flat)
+
+    def test_a_truncated_conflict_scan_says_so(self):
+        repo = self.repo()
+        room.CONFLICT_SCANS.clear()
+        room.CONFLICT_SCANS[repo.room_id] = (room.time.monotonic(), [], {"probed": 40, "cap": 40, "nominated": 91, "complete": False})
+        reported = room.incomplete_coverage(repo)
+        self.assertEqual(reported["conflict_scan"]["nominated"], 91)
+        self.assertIn("chat-room ready", reported["conflict_scan"]["detail"])
+        # A complete scan adds nothing, so callers never see a key that means nothing.
+        room.CONFLICT_SCANS[repo.room_id] = (room.time.monotonic(), [], {"probed": 3, "cap": 40, "nominated": 3, "complete": True})
+        self.assertEqual(room.incomplete_coverage(repo), {})
+        room.CONFLICT_SCANS.clear()
 
     def test_the_protocol_document_matches_the_code(self):
         # The contract drifted once already: the document advertised seven tools when

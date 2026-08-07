@@ -146,11 +146,11 @@ chat-room post --kind request --topic cleanup \
 
 ## Carrying tags into sessions
 
-A delivered tag starts a vendor CLI turn, which costs vendor tokens. `delivery_policy/wake_on_tag`
+A delivered tag starts a vendor CLI turn, which costs vendor tokens. `delivery_policy/wake-on-tag`
 governs it and is an ordinary indexed option:
 
 ```sh
-chat-room option-set --namespace delivery_policy --key wake_on_tag --value off
+chat-room option-set --namespace delivery_policy --key wake-on-tag --value off
 ```
 
 | value | behaviour |
