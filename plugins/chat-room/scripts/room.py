@@ -26,7 +26,7 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
 
 PLUGIN_NAME = "chat-room"
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 SCHEMA_VERSION = 6
 ACTIVE_WINDOW_SECONDS = 30 * 60
 WAKE_ENDPOINT_ENV = "CHAT_ROOM_WAKE_ENDPOINT"

@@ -538,6 +538,25 @@ class RoomTests(unittest.TestCase):
                 history = room.chat_transcript(repo, "Codex", "session-all")
             self.assertEqual(len(history["messages"]), 1005)
 
+    def test_every_shipped_file_is_covered_by_the_package_data_globs(self):
+        """A named glob ships in a checkout and silently misses the wheel.
+
+        Building a wheel here would be slow, so this asserts the cheaper property that
+        actually broke: every non-Python file the plugin needs matches a declared pattern.
+        """
+        import fnmatch
+        plugin = MODULE.parents[1]
+        pyproject = (MODULE.parents[3] / "pyproject.toml").read_text()
+        block = re.search(r"chat_room = \[(.*?)\]", pyproject, re.S)
+        self.assertIsNotNone(block, "pyproject.toml declares no package data for chat_room")
+        patterns = re.findall(r'"([^"]+)"', block.group(1))
+        shipped = [p for p in plugin.rglob("*") if p.is_file() and p.suffix != ".py" and "__pycache__" not in p.parts]
+        self.assertTrue(shipped)
+        for path in shipped:
+            relative = path.relative_to(plugin).as_posix()
+            self.assertTrue(any(fnmatch.fnmatch(relative, pattern) for pattern in patterns),
+                            f"{relative} ships in a checkout but matches no package-data pattern")
+
     def test_a_rule_nobody_set_reports_its_default_as_undecided(self):
         # The difference between a default and an answer is what lets an interrogation
         # ask only what is still open, so it has to survive a round trip.
