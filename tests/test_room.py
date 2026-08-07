@@ -529,12 +529,17 @@ class RoomTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             memo = room.merge_memo(Path(temp))
             self.assertIsNotNone(memo)
-            with mock.patch.object(room, "run_git", side_effect=lambda _c, *a, **k: heads[a[-1].split("^")[0]]), \
-                 mock.patch.object(room.subprocess, "run", side_effect=fake_run):
-                first = room.merge_conflict_paths(repo, "one", "two", memo, {})
-                second = room.merge_conflict_paths(repo, "one", "two", memo, {})
-                # Order must not matter: the same two commits are the same question.
-                third = room.merge_conflict_paths(repo, "two", "one", memo, {})
+            # Closed inside the directory's own block: an addCleanup runs after it is gone,
+            # and Windows will not remove a directory whose file is still open.
+            try:
+                with mock.patch.object(room, "run_git", side_effect=lambda _c, *a, **k: heads[a[-1].split("^")[0]]), \
+                     mock.patch.object(room.subprocess, "run", side_effect=fake_run):
+                    first = room.merge_conflict_paths(repo, "one", "two", memo, {})
+                    second = room.merge_conflict_paths(repo, "one", "two", memo, {})
+                    # Order must not matter: the same two commits are the same question.
+                    third = room.merge_conflict_paths(repo, "two", "one", memo, {})
+            finally:
+                memo.close()
         self.assertEqual(first, {"app/ui.tsx"})
         self.assertEqual(second, first)
         self.assertEqual(third, first)
@@ -550,10 +555,13 @@ class RoomTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp:
             memo = room.merge_memo(Path(temp))
-            with mock.patch.object(room, "run_git", side_effect=lambda _c, *a, **k: "c" * 40 if "one" in a[-1] else "d" * 40), \
-                 mock.patch.object(room.subprocess, "run", side_effect=fake_run):
-                self.assertEqual(room.merge_conflict_paths(repo, "one", "two", memo, {}), set())
-                self.assertEqual(room.merge_conflict_paths(repo, "one", "two", memo, {}), set())
+            try:
+                with mock.patch.object(room, "run_git", side_effect=lambda _c, *a, **k: "c" * 40 if "one" in a[-1] else "d" * 40), \
+                     mock.patch.object(room.subprocess, "run", side_effect=fake_run):
+                    self.assertEqual(room.merge_conflict_paths(repo, "one", "two", memo, {}), set())
+                    self.assertEqual(room.merge_conflict_paths(repo, "one", "two", memo, {}), set())
+            finally:
+                memo.close()
         # Most pairs are clean. Re-proving that every run is what made a sweep unaffordable.
         self.assertEqual(calls["n"], 1, "a clean answer was not remembered")
 

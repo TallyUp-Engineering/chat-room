@@ -560,6 +560,7 @@ def merge_conflict_paths(repo: Repository, left: str, right: str, memo: Optional
 
 
 def scan_preemptive_conflicts(repo: Repository, data_dir: Optional[Path] = None) -> None:
+    memo: Optional[sqlite3.Connection] = None
     try:
         worktrees = [item for item in list_worktree_references(repo) if Path(str(item["path"])).exists()]
         dirty = {str(item["path"]): changed_worktree_paths(Path(str(item["path"]))) for item in worktrees}
@@ -588,7 +589,9 @@ def scan_preemptive_conflicts(repo: Repository, data_dir: Optional[Path] = None)
         with CONFLICT_SCAN_LOCK:
             CONFLICT_SCANS[repo.room_id] = (time.monotonic(), conflicts, coverage)
     finally:
-        pass
+        # An open handle keeps the file alive, which POSIX tolerates and Windows does not.
+        if memo is not None:
+            memo.close()
 
 
 def preemptive_conflicts(repo: Repository, data_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
@@ -1202,6 +1205,13 @@ class RoomStore:
         target = (into or "").strip() or (repo.branch if repo.branch in ("main", "master") else "main")
         memo = merge_memo(self.data_dir)
         heads: Dict[str, str] = {}
+        try:
+            return self._merge_readiness(repo, target, memo, heads)
+        finally:
+            if memo is not None:
+                memo.close()
+
+    def _merge_readiness(self, repo: Repository, target: str, memo: Optional[sqlite3.Connection], heads: Dict[str, str]) -> Dict[str, Any]:
         branches: List[Dict[str, Any]] = []
         touched: Dict[str, Set[str]] = {}
         for worktree in list_worktree_references(repo):
