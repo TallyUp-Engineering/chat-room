@@ -53,23 +53,30 @@ jobs:
       - run: python -m pip install --disable-pip-version-check build twine
       - run: python -m build
 
-      # A wheel that imports is not the same as a wheel that carries its data files. The
-      # skills, hooks, and manifests are what make an installed copy behave like a checkout.
-      - name: Check the distributions carry what the plugin needs
+      # A wheel that imports is not the same as a wheel that carries its data files.
+      #
+      # This compares the wheel against the repository rather than against a threshold.
+      # 0.7.0 shipped without one of its two skills because the check here asked whether
+      # *any* skill was present, which is true when half of them are missing.
+      - name: Check the wheel carries every non-Python file the plugin ships
         run: |
           python -m twine check dist/*
           python - <<'PY'
-          import glob, zipfile, sys
+          import glob, pathlib, zipfile, sys
           wheel = glob.glob("dist/*.whl")[0]
-          names = zipfile.ZipFile(wheel).namelist()
-          required = ["chat_room/hooks/hooks.json", "chat_room/.mcp.json", "chat_room/.codex-plugin/plugin.json"]
-          missing = [name for name in required if name not in names]
-          skills = [name for name in names if name.startswith("chat_room/skills/") and name.endswith(".md")]
-          if not skills:
-              missing.append("chat_room/skills/*/SKILL.md")
+          packed = set(zipfile.ZipFile(wheel).namelist())
+          source = pathlib.Path("plugins/chat-room")
+          expected = {
+              f"chat_room/{path.relative_to(source).as_posix()}"
+              for path in source.rglob("*")
+              if path.is_file() and path.suffix != ".py" and "__pycache__" not in path.parts
+          }
+          missing = sorted(expected - packed)
           if missing:
-              sys.exit(f"{wheel} is missing {missing}")
-          print(f"{wheel} carries {len(skills)} skill(s) and every manifest")
+              sys.exit(f"{wheel} is missing {len(missing)} file(s) the repository ships:\n  " + "\n  ".join(missing))
+          print(f"{wheel} carries all {len(expected)} data files:")
+          for name in sorted(expected):
+              print(f"  {name}")
           PY
 
       # Installing from the built wheel is the only way to know the console script and
