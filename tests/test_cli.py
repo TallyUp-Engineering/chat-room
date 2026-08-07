@@ -174,6 +174,7 @@ class CommandTests(unittest.TestCase):
                 self.assertIn("already running", refused.stderr)
             finally:
                 lock.unlink(missing_ok=True)
+            self.settle_warmers(fresh)
 
     def test_a_first_read_warms_in_the_background_and_says_so(self):
         with tempfile.TemporaryDirectory() as fresh:
