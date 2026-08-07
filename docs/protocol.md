@@ -87,6 +87,7 @@ Each accepts `--cwd` to name the worktree it acts in.
 | `chat-room send` | Continue a stored conversation through its vendor CLI. |
 | `chat-room stop` | Interrupt a local turn this room started. |
 | `chat-room index` | Backfill the optional transcript index. |
+| `chat-room warm` | Fill the merge memo so `ready` is fast. One per room at a time. |
 | `chat-room codex` | Run Codex with a wake endpoint this room can reach. |
 | `chat-room hook` | Emit coordination context to a host CLI. |
 | `chat-room mcp` | Serve the MCP tools above over stdio. |
@@ -133,6 +134,25 @@ Reading the board touches no session and starts no turn.
 Every rule is evaluated from cheap, cached observations, because they run on the hook path.
 The expensive question — does this branch still merge into the integration branch — stays in
 `chat-room ready`, where a human asked for it and can wait.
+
+## Warming
+
+`chat-room ready` asks Git about every branch pair that shares a changed file. Whether two
+commits conflict is a fixed fact, so each answer is memoised against the pair of commits —
+a key that changes the moment either branch moves, which is what lets the memo live without
+an expiry.
+
+The first sweep of a large project is slow and every one after it is not. `chat-room warm`
+does that sweep on purpose and reports progress. The first human-facing read of a room whose
+memo is empty also starts one in the background, says so on stderr, and never does it again:
+
+```sh
+chat-room option-set --namespace warm --key in-background --value off
+```
+
+Only one warmer runs per room. It claims the lock itself rather than being handed one, and
+its output goes to `warm.log` beside the room, because a detached process that fails
+silently is indistinguishable from one that never started.
 
 ## Carrying tags into sessions
 

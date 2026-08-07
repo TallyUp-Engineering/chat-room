@@ -16,6 +16,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -139,6 +140,42 @@ class CommandTests(unittest.TestCase):
                                   text=True, capture_output=True, timeout=120)
             self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("Merge conflict", done.stdout, "a first-ever `board` hid a live collision")
+
+    def test_warming_fills_the_memo_and_only_one_may_run(self):
+        """`ready` is slow exactly once. This is the command that spends that once."""
+        with tempfile.TemporaryDirectory() as fresh:
+            warmed = subprocess.run([sys.executable, str(ROOM), "--data-dir", fresh, "warm", "--cwd", str(self.proj), "--into", "main"],
+                                    text=True, capture_output=True, timeout=180)
+            self.assertEqual(warmed.returncode, 0, warmed.stderr)
+            summary = json.loads(warmed.stdout)
+            self.assertGreater(summary["warmed"], 0, "the sweep probed nothing")
+            self.assertIn("checking branch pairs", warmed.stderr, "it worked in silence")
+
+            # A second warmer must stand down rather than duplicate the sweep.
+            lock = Path(fresh) / f"warm-{summary['room_id']}.lock"
+            lock.write_text(str(os.getpid()))
+            try:
+                refused = subprocess.run([sys.executable, str(ROOM), "--data-dir", fresh, "warm", "--cwd", str(self.proj)],
+                                         text=True, capture_output=True, timeout=180)
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertIn("already running", refused.stderr)
+            finally:
+                lock.unlink(missing_ok=True)
+
+    def test_a_first_read_warms_in_the_background_and_says_so(self):
+        with tempfile.TemporaryDirectory() as fresh:
+            first = subprocess.run([sys.executable, str(ROOM), "--data-dir", fresh, "board", "--cwd", str(self.proj)],
+                                   text=True, capture_output=True, timeout=180)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertIn("warming the merge memo", first.stderr, "a cold room warmed silently, or not at all")
+            self.assertIn("BACKLOG", first.stdout, "the human was made to wait for the warm")
+            # Whatever the warmer did, it must not have been on the human's clock.
+            for _ in range(60):
+                if not list(Path(fresh).glob("warm-*.lock")):
+                    break
+                time.sleep(0.5)
+            log = Path(fresh) / "warm.log"
+            self.assertTrue(log.exists(), "a detached warmer left nothing a person could read")
 
     # --- rules, through the hook a host CLI actually calls --------------------
 

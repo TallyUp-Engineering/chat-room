@@ -119,10 +119,12 @@ NS_RULES = "rules"
 NS_DELIVERY = "delivery_policy"
 NS_NOTIFICATION = "notification_policy"
 NS_ROOM_NAME = "room_name"
+NS_WARM = "warm"
 NS_CHAT_NAME = "chat_name"
 KEY_WAKE_ON_TAG = "wake-on-tag"
 KEY_STALE_WORKTREE_DAYS = "stale-worktree-days"
-OPTION_KEYS = (KEY_WAKE_ON_TAG, KEY_STALE_WORKTREE_DAYS)
+KEY_WARM_IN_BACKGROUND = "in-background"
+OPTION_KEYS = (KEY_WAKE_ON_TAG, KEY_STALE_WORKTREE_DAYS, KEY_WARM_IN_BACKGROUND)
 RULE_CATALOG = (
     ("one-actor-per-worktree", "advise", "shared-worktree", "More than one active agent in one worktree."),
     ("file-overlap", "advise", "file-overlap", "Two worktrees currently modifying the same path."),
@@ -491,6 +493,125 @@ def branch_changed_paths(repo: Repository, target: str, branch: str) -> Set[str]
         return set()
     output = run_git(repo.worktree, "diff", "--name-only", f"{target}...{branch}", check=False)
     return {line for line in output.splitlines() if line.strip()}
+
+
+def report_progress(done: int, total: int, label: str) -> None:
+    """Say what is happening on stderr, so stdout stays a parseable answer.
+
+    A sweep of a large project takes half a minute the first time. Silence for that long
+    is indistinguishable from a hang, which is the actual problem worth solving.
+    """
+    if not total:
+        return
+    line = f"chat-room: {label} {done}/{total} ({done * 100 // total}%)"
+    if sys.stderr.isatty():
+        sys.stderr.write("\r\033[K" + line + ("\n" if done >= total else ""))
+    elif done >= total or done % max(1, total // 10) == 0:
+        sys.stderr.write(line + "\n")
+    sys.stderr.flush()
+
+
+def warm_lock_path(data_dir: Path, room_id: str) -> Path:
+    return Path(data_dir) / f"warm-{room_id}.lock"
+
+
+def warm_is_running(data_dir: Path, room_id: str) -> bool:
+    """Whether a warmer already holds the lock, ignoring one left by a dead process."""
+    lock = warm_lock_path(data_dir, room_id)
+    try:
+        owner = int(lock.read_text().strip())
+    except (OSError, ValueError):
+        return False
+    if owner == os.getpid():
+        return False
+    try:
+        os.kill(owner, 0)
+    except OSError:
+        lock.unlink(missing_ok=True)
+        return False
+    return True
+
+
+def claim_warm_lock(data_dir: Path, room_id: str) -> bool:
+    """Take the lock, or report that a living warmer already holds it.
+
+    The claim is the file creation itself, so two warmers starting in the same instant
+    cannot both believe they won. Only the warmer claims it — a parent that wrote the lock
+    on its child's behalf would leave the child reading its own pid and standing down.
+    """
+    lock = warm_lock_path(data_dir, room_id)
+    for _attempt in (0, 1):
+        try:
+            handle = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            if warm_is_running(data_dir, room_id):
+                return False
+            lock.unlink(missing_ok=True)
+            continue
+        except OSError:
+            return False
+        with os.fdopen(handle, "w") as writer:
+            writer.write(str(os.getpid()))
+        return True
+    return False
+
+
+def memo_is_cold(data_dir: Optional[Path]) -> bool:
+    if data_dir is None:
+        return False
+    memo = merge_memo(data_dir)
+    if memo is None:
+        return False
+    try:
+        return int(memo.execute("SELECT COUNT(*) FROM merge_probe").fetchone()[0]) == 0
+    except sqlite3.Error:
+        return False
+    finally:
+        memo.close()
+
+
+def offer_warm(data_dir: Path, repo: Repository, store: "RoomStore") -> None:
+    """Start a warmer the first time a room is used, unless the operator turned it off.
+
+    Only when the memo is empty, which is once per machine per project. After that the
+    sweep is fast enough that doing this again would be spending someone's CPU for nothing.
+    """
+    if store.display_name(NS_WARM, KEY_WARM_IN_BACKGROUND, "auto") != "auto":
+        return
+    if not memo_is_cold(data_dir):
+        return
+    if warm_in_background(data_dir, repo):
+        print(f"chat-room: first use here — warming the merge memo in the background so "
+              f"`chat-room ready` is fast. Turn it off with "
+              f"`chat-room option-set --namespace {NS_WARM} --key {KEY_WARM_IN_BACKGROUND} --value off`.",
+              file=sys.stderr)
+
+
+def warm_in_background(data_dir: Path, repo: Repository) -> bool:
+    """Fill the memo in a detached process, at most one per room.
+
+    Nothing here is silent: the caller says a warmer started, because a command that
+    quietly spawns work on someone's machine is worse than a slow command.
+    """
+    if warm_is_running(data_dir, repo.room_id):
+        return False
+    # Its output goes to a file rather than to nowhere: a detached warmer that fails
+    # silently is indistinguishable from one that never started, which cost an afternoon.
+    log = Path(data_dir) / "warm.log"
+    try:
+        handle = open(log, "ab", buffering=0)
+    except OSError:
+        return False
+    try:
+        subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "--data-dir", str(data_dir), "warm", "--cwd", str(repo.worktree), "--quiet"],
+            stdin=subprocess.DEVNULL, stdout=handle, stderr=handle, start_new_session=True,
+        )
+    except OSError:
+        return False
+    finally:
+        handle.close()
+    return True
 
 
 def resolved_head(repo: Repository, ref: str, seen: Dict[str, str]) -> str:
@@ -1196,7 +1317,7 @@ class RoomStore:
             worktree["uncommitted"] = len(changed_worktree_paths(path)) if path.exists() else 0
         return {"room_id": repo.room_id, "agents": agents, "worktrees": worktrees, "human": {"target": "@human"}}
 
-    def merge_readiness(self, repo: Repository, into: Optional[str] = None) -> Dict[str, Any]:
+    def merge_readiness(self, repo: Repository, into: Optional[str] = None, progress: Optional[Any] = None) -> Dict[str, Any]:
         """Which branches merge cleanly into the integration branch, and which do not.
 
         Answering this before a merge is attempted is the difference between discovering a
@@ -1206,12 +1327,12 @@ class RoomStore:
         memo = merge_memo(self.data_dir)
         heads: Dict[str, str] = {}
         try:
-            return self._merge_readiness(repo, target, memo, heads)
+            return self._merge_readiness(repo, target, memo, heads, progress)
         finally:
             if memo is not None:
                 memo.close()
 
-    def _merge_readiness(self, repo: Repository, target: str, memo: Optional[sqlite3.Connection], heads: Dict[str, str]) -> Dict[str, Any]:
+    def _merge_readiness(self, repo: Repository, target: str, memo: Optional[sqlite3.Connection], heads: Dict[str, str], progress: Optional[Any] = None) -> Dict[str, Any]:
         branches: List[Dict[str, Any]] = []
         touched: Dict[str, Set[str]] = {}
         for worktree in list_worktree_references(repo):
@@ -1232,19 +1353,23 @@ class RoomStore:
         # lands — two additions at the same place read as independent until they are not. Only
         # pairs that touch a file in common are worth asking Git about.
         by_branch = {item["branch"]: item for item in branches}
+        candidates = [
+            (left, right)
+            for index, left in enumerate(branches)
+            for right in branches[index + 1:]
+            if touched[left["branch"]] & touched[right["branch"]]
+        ]
+        nominated = len(candidates)
         probes = 0
-        nominated = 0
-        for index, left in enumerate(branches):
-            for right in branches[index + 1:]:
-                if not touched[left["branch"]] & touched[right["branch"]]:
-                    continue
-                nominated += 1
-                probes += 1
-                shared = sorted(merge_conflict_paths(repo, left["branch"], right["branch"], memo, heads))
-                if not shared:
-                    continue
-                by_branch[left["branch"]]["collides_with"].append({"branch": right["branch"], "paths": shared})
-                by_branch[right["branch"]]["collides_with"].append({"branch": left["branch"], "paths": shared})
+        for left, right in candidates:
+            probes += 1
+            if progress:
+                progress(probes, nominated, "checking branch pairs")
+            shared = sorted(merge_conflict_paths(repo, left["branch"], right["branch"], memo, heads))
+            if not shared:
+                continue
+            by_branch[left["branch"]]["collides_with"].append({"branch": right["branch"], "paths": shared})
+            by_branch[right["branch"]]["collides_with"].append({"branch": left["branch"], "paths": shared})
 
         branches.sort(key=lambda item: (item["merges_cleanly"], not item["collides_with"], item["branch"]))
         verdict = {
@@ -2088,6 +2213,7 @@ def parser() -> argparse.ArgumentParser:
     search = sub.add_parser("search"); search.add_argument("--cwd"); search.add_argument("--query", required=True); search.add_argument("--limit", type=int, default=100); search.add_argument("--scope", choices=("room", "chats"), default="room")
     index = sub.add_parser("index"); index.add_argument("--cwd")
     ready = sub.add_parser("ready"); ready.add_argument("--cwd"); ready.add_argument("--into")
+    warm = sub.add_parser("warm"); warm.add_argument("--cwd"); warm.add_argument("--into"); warm.add_argument("--quiet", action="store_true")
     sub.add_parser("projects").add_argument("--cwd")
     spend = sub.add_parser("spend"); spend.add_argument("--cwd"); spend.add_argument("--days", type=int, default=7)
     identify = sub.add_parser("identify"); identify.add_argument("--cwd"); identify.add_argument("--session", required=True); identify.add_argument("--handle", required=True)
@@ -2135,9 +2261,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             elif args.command == "send": value = start_chat_delivery(args.data_dir, repo, args.client, args.session, args.message, store.members(repo.room_id), chat_images(args.image))
             elif args.command == "rename": value = store.rename(repo, args.kind, args.reference, args.label, args.client)
             elif args.command == "alerts":
+                offer_warm(args.data_dir, repo, store)
                 value = {"room_id": repo.room_id, "alerts": coordination_alerts(store.targets(repo), store.sync_preemptive_conflicts(repo), store.rules())}
                 value.update(incomplete_coverage(repo))
+            elif args.command == "warm":
+                if not claim_warm_lock(args.data_dir, repo.room_id):
+                    raise RoomError("a warm is already running for this room")
+                try:
+                    verdict = store.merge_readiness(repo, args.into, None if args.quiet else report_progress)
+                finally:
+                    warm_lock_path(args.data_dir, repo.room_id).unlink(missing_ok=True)
+                value = {"room_id": repo.room_id, "warmed": verdict["pairs_probed"], "into": verdict["into"]}
             elif args.command == "board":
+                offer_warm(args.data_dir, repo, store)
                 print(render_board(store.board(repo)), end="")
                 return 0
             elif args.command == "rules": value = {"room_id": repo.room_id, "rungs": list(RULE_RUNGS), "rules": store.rules(), "set_with": f"chat-room option-set --namespace {NS_RULES} --key <name> --value <rung>"}
@@ -2146,7 +2282,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 for chat in chats: chat["title"] = store.display_name(NS_CHAT_NAME, f"{chat['client']}-{chat['id']}", str(chat["title"]))
                 value = {"room_id": repo.room_id, "chats": chats}
             elif args.command == "index": value = run_index(args.data_dir, repo)
-            elif args.command == "ready": value = store.merge_readiness(repo, args.into)
+            elif args.command == "ready":
+                # Warming here would duplicate the work, so this one reports instead.
+                value = store.merge_readiness(repo, args.into, report_progress)
             elif args.command == "projects": value = store.projects(repo)
             elif args.command == "spend": value = spend_report(args.data_dir, repo, args.days)
             elif args.command == "search":

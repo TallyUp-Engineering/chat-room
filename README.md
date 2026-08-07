@@ -132,6 +132,7 @@ chat-room board
 chat-room rules
 chat-room alerts
 chat-room ready --into main
+chat-room warm                 # fill the merge memo; ready is fast afterwards
 chat-room search --query "rebase door"
 chat-room start --client claude --worktree ../lane-one --prompt "rebuild the projection and report"
 chat-room stop --client claude --session <session-id>
