@@ -52,7 +52,8 @@ Exposed over stdio MCP. Inputs and outputs are JSON; the message schema is `chat
 ## Command line
 
 The `chat-room` command is the whole human surface. Every subcommand prints JSON except
-`chat` and `codex`, which are interactive, and `hook`/`mcp`, which speak to a host program.
+`board`, which renders columns, `chat` and `codex`, which are interactive, and `hook`/`mcp`,
+which speak to a host program.
 Each accepts `--cwd` to name the worktree it acts in.
 
 | Read | Returns |
@@ -66,6 +67,7 @@ Each accepts `--cwd` to name the worktree it acts in.
 | `chat-room alerts` | Shared worktrees, overlaps, decisions, and stale lanes, at whatever height the rules put them. |
 | `chat-room rules` | Every house rule, the rung it sits at, and whether anyone has decided it. |
 | `chat-room chats` | Local CLI conversations discovered for this project. |
+| `chat-room board` | Coordination work as columns; the only subcommand that renders rather than prints JSON. |
 | `chat-room ready` | Which worktree branches merge cleanly into `--into`, and which collide. |
 | `chat-room projects` | Every project with a room on this machine, worktrees grouped under it. |
 | `chat-room spend` | Token spend per worktree beside the commits it produced. |
@@ -109,9 +111,24 @@ sets one and no separate write command exists. A rule nobody has set reports its
 and `decided: false`; the difference between a default and an answer is what lets an
 interrogation ask only what is still open.
 
-`refuse` is binding on every agent that reads its injected context. It is not mechanically
-blocked — the room opens no listening socket and holds no authority over Git — and
-`chat-room rules` reports `mechanically_enforced: false` rather than implying otherwise.
+`refuse` is the only rung that can interrupt a turn. A rule at that height is evaluated in a
+`PreToolUse` hook and answers with a `deny` decision, so the write does not happen. Only rules
+answerable from presence are checked there, because it runs before every write; anything that
+shells out to Git belongs in `chat-room ready`.
+
+The hook fails open. A room that is unreachable, unreadable, or outside a Git worktree returns
+`{"continue": true}` and never a denial — a broken room must not be able to stop work. The
+room still holds no authority over Git: it refuses a write through the host CLI's own
+permission decision, and cannot undo one that already happened.
+
+## The board
+
+`chat-room board` groups coordination threads into `backlog`, `doing`, `blocked`, and `done`.
+No column is stored. A thread is already a card, and where it sits follows from what the room
+observes: `done` is a resolved or archived thread, `blocked` is one waiting on a human, `doing`
+has an active participant, and `backlog` has none. A worker moves a card by doing the work.
+
+Reading the board touches no session and starts no turn.
 
 Every rule is evaluated from cheap, cached observations, because they run on the hook path.
 The expensive question — does this branch still merge into the integration branch — stays in

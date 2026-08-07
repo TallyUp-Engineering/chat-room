@@ -1,9 +1,65 @@
 {
   "hooks": {
-    "SessionStart": [{"hooks":[{"type":"command","command":"CHAT_ROOM_CLIENT=claude /absolute/path/to/chat-room/bin/chat-room hook"}]}],
-    "UserPromptSubmit": [{"hooks":[{"type":"command","command":"CHAT_ROOM_CLIENT=claude /absolute/path/to/chat-room/bin/chat-room hook"}]}],
-    "PostToolUse": [{"hooks":[{"type":"command","command":"CHAT_ROOM_CLIENT=claude /absolute/path/to/chat-room/bin/chat-room hook"}]}],
-    "Stop": [{"hooks":[{"type":"command","command":"CHAT_ROOM_CLIENT=claude /absolute/path/to/chat-room/bin/chat-room hook"}]}],
-    "SessionEnd": [{"hooks":[{"type":"command","command":"CHAT_ROOM_CLIENT=claude /absolute/path/to/chat-room/bin/chat-room hook"}]}]
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CHAT_ROOM_CLIENT=claude /absolute/path/to/chat-room/bin/chat-room hook"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CHAT_ROOM_CLIENT=claude /absolute/path/to/chat-room/bin/chat-room hook"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CHAT_ROOM_CLIENT=claude /absolute/path/to/chat-room/bin/chat-room hook"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CHAT_ROOM_CLIENT=claude /absolute/path/to/chat-room/bin/chat-room hook"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CHAT_ROOM_CLIENT=claude /absolute/path/to/chat-room/bin/chat-room hook"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CHAT_ROOM_CLIENT=claude /absolute/path/to/chat-room/bin/chat-room hook"
+          }
+        ]
+      }
+    ]
   }
 }

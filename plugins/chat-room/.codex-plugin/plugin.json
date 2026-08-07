@@ -1,6 +1,6 @@
 {
   "name": "chat-room",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "A local command line for durable human questions, agent-only chatter, CLI chats, and conflict detection.",
   "author": { "name": "Chat Room", "url": "https://github.com/TallyUp-Engineering/chat-room" },
   "license": "Apache-2.0",
