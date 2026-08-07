@@ -43,7 +43,7 @@ Exposed over stdio MCP. Inputs and outputs are JSON; the message schema is `chat
 | `room_session_stop` | Interrupt a local turn this room started. |
 | `room_ready` | Which worktree branches merge cleanly into the integration branch, and which collide. |
 | `room_projects` | Every project with a room on this machine, worktrees grouped under it. |
-| `room_spend` | Token spend per worktree beside the commits it produced. |
+| `room_spend` | Token spend per worktree beside the commits it produced. Needs the optional index. |
 | `room_search` | Search room messages, or indexed transcripts with `scope: chats`. |
 | `room_handoff` | Post a structured handoff. |
 
@@ -70,7 +70,7 @@ Each accepts `--cwd` to name the worktree it acts in.
 | `chat-room board` | Coordination work as columns; the only subcommand that renders rather than prints JSON. |
 | `chat-room ready` | Which worktree branches merge cleanly into `--into`, and which collide. |
 | `chat-room projects` | Every project with a room on this machine, worktrees grouped under it. |
-| `chat-room spend` | Token spend per worktree beside the commits it produced. |
+| `chat-room spend` | Token spend per worktree beside the commits it produced. Needs the optional index. |
 | `chat-room options` | Indexed notification and delivery options. |
 | `chat-room doctor` | Why the room is broken, with `--repair`. |
 
@@ -146,4 +146,5 @@ sixty seconds.
 With the `index` extra installed, local transcripts are indexed into
 **actor**, **chat**, **turn**, and **server** tables and `scope: chats` searches inside them.
 SQLite is the default; `CHAT_ROOM_DATABASE_URL` selects Postgres. Chat Room runs without any
-of it — every caller degrades to reading vendor files directly.
+of it — every caller degrades to reading vendor files directly, with one exception:
+`chat-room spend` has no token figures without the index and says so rather than guessing.

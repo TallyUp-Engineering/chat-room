@@ -3,7 +3,7 @@
 check: test lint audit
 
 test:
-	python3 -m unittest discover -s tests -p 'test_room.py' -v
+	python3 -m unittest discover -s tests -p 'test_*.py' -v
 	npm test
 
 lint:

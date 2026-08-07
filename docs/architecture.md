@@ -21,6 +21,8 @@ it, because a constraint nobody checks is a preference, and preferences erode.
 | 10 | Nothing the room does can stop work when the room itself is broken. Every hook failure mode returns `continue`. | `test_the_hook_fails_open_when_the_room_is_unreadable` |
 | 11 | Bounded coverage is reported. A scan that stops early says so, because a conflict detector that quietly stops looking reads as "no conflicts". | `test_a_truncated_conflict_scan_says_so` |
 | 12 | A value-free filter rejects credential shapes before anything is persisted. | `test_value_free_filter` |
+| 13 | Every user-facing read runs as a real process against a real Git project, not only against the store in-process. A bug that depends on the process exiting is invisible to any test that *is* that process. | `test_the_process_boundary_covers_every_subcommand`, `test_a_fresh_process_reports_the_conflict_it_finds` |
+| 14 | Bounded work is reported by the caller, not assumed by it. `spend` is the one read that cannot degrade without the optional index, and says so. | `test_spend_says_what_it_needs_when_the_index_is_absent` |
 
 ## Why this file is checked too
 
