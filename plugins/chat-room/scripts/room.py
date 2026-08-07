@@ -1137,11 +1137,16 @@ class RoomStore:
         # pairs that touch a file in common are worth asking Git about.
         by_branch = {item["branch"]: item for item in branches}
         probes = 0
+        nominated = 0
         for index, left in enumerate(branches):
             for right in branches[index + 1:]:
-                if probes >= MAX_CONFLICT_PROBES:
-                    break
                 if not touched[left["branch"]] & touched[right["branch"]]:
+                    continue
+                nominated += 1
+                # Counting past the cap rather than breaking: how much was left unchecked
+                # is the difference between a complete answer and a partial one, and the
+                # caller cannot tell them apart unless it is told.
+                if probes >= MAX_CONFLICT_PROBES:
                     continue
                 probes += 1
                 shared = sorted(merge_conflict_paths(repo, left["branch"], right["branch"]))
@@ -1151,14 +1156,20 @@ class RoomStore:
                 by_branch[right["branch"]]["collides_with"].append({"branch": left["branch"], "paths": shared})
 
         branches.sort(key=lambda item: (item["merges_cleanly"], not item["collides_with"], item["branch"]))
-        return {
+        verdict = {
             "into": target,
             "clean": sum(1 for b in branches if b["merges_cleanly"] and not b["collides_with"]),
             "conflicted": sum(1 for b in branches if not b["merges_cleanly"]),
             "latent": sum(1 for b in branches if b["merges_cleanly"] and b["collides_with"]),
             "pairs_probed": probes,
+            "pairs_nominated": nominated,
+            "complete": nominated <= MAX_CONFLICT_PROBES,
             "branches": branches,
         }
+        if not verdict["complete"]:
+            verdict["detail"] = (f"{nominated} branch pairs share a changed file but only {probes} were checked "
+                                 f"against Git. `latent` counts what was checked, so treat it as a floor, not a total.")
+        return verdict
 
     def projects(self, current: Optional[Repository] = None) -> Dict[str, Any]:
         """Every project this machine has a room for, with its worktrees grouped under it.
@@ -1234,6 +1245,10 @@ class RoomStore:
             active.update({str(member.get("target") or ""), str(member.get("worktree_target") or "")})
         active.discard("")
 
+        # Run the overlap scan for its effect, not its return value: it opens and resolves
+        # the conflict threads that become cards. Reading threads without it means the most
+        # human-facing view is the one place a live collision does not appear.
+        self.sync_preemptive_conflicts(repo)
         columns: Dict[str, List[Dict[str, Any]]] = {name: [] for name in BOARD_COLUMNS}
         for thread in self.threads(repo, include_resolved=True):
             owners = sorted(set(thread["participants"]).intersection(active))
@@ -1259,7 +1274,8 @@ class RoomStore:
         ]
         return {"room_id": repo.room_id, "columns": columns,
                 "counts": {name: len(items) for name, items in columns.items()},
-                "active_elsewhere": sorted(elsewhere, key=lambda item: item["target"])}
+                "active_elsewhere": sorted(elsewhere, key=lambda item: item["target"]),
+                **incomplete_coverage(repo)}
 
     def thread(self, repo: Repository, thread_id: str) -> Dict[str, Any]:
         value = next((item for item in self.threads(repo, True) if item["id"] == thread_id), None)
@@ -1903,6 +1919,11 @@ def render_board(board: Dict[str, Any], width: int = 0) -> str:
     if unheld:
         lines.append("")
         lines.append("Active with no card: " + ", ".join(f"{item['target']} in {item['worktree_target']}" for item in unheld))
+    partial = board.get("conflict_scan")
+    if partial:
+        lines.append("")
+        lines.append(f"Partial scan: {partial['probed']} of {partial['nominated']} overlapping worktree pairs checked. "
+                     "Run `chat-room ready` for a per-branch answer.")
     return "\n".join(lines).rstrip() + "\n"
 
 

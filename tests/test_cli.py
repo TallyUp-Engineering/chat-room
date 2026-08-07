@@ -130,6 +130,16 @@ class CommandTests(unittest.TestCase):
         self.assertIn("Merge conflict", rendered)
         self.assertRegex(rendered, r"#lane-one")
 
+    def test_the_board_alone_surfaces_a_live_collision(self):
+        """The board is the most human-facing read, so it cannot be the one view that
+        misses a collision. It used to render the conflict threads without running the scan
+        that creates them, so a room where nobody had run `threads` first showed nothing."""
+        with tempfile.TemporaryDirectory() as fresh:
+            done = subprocess.run([sys.executable, str(ROOM), "--data-dir", fresh, "board", "--cwd", str(self.proj)],
+                                  text=True, capture_output=True, timeout=120)
+            self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("Merge conflict", done.stdout, "a first-ever `board` hid a live collision")
+
     # --- rules, through the hook a host CLI actually calls --------------------
 
     def test_a_refused_rule_denies_a_write_and_an_advisory_one_does_not(self):

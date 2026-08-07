@@ -459,6 +459,39 @@ class RoomTests(unittest.TestCase):
         self.assertNotIn("merge-tree", flat)
         self.assertNotIn("--porcelain", flat)
 
+    def test_merge_readiness_says_when_it_only_looked_at_some_of_the_pairs(self):
+        """Found against a 40-worktree project: 40 of 820 pairs probed, reported as if whole.
+
+        The cap is exercised by lowering it rather than by building forty worktrees — the
+        behaviour that matters is what happens on the far side of the bound, not the size of
+        the fixture that gets there.
+        """
+        repo = self.repo()
+        worktrees = [{"target": f"#lane-{i}", "name": f"lane-{i}", "path": f"/project/{i}", "branch": f"lane-{i}"} for i in range(4)]
+        with mock.patch.object(room, "list_worktree_references", return_value=worktrees), \
+             mock.patch.object(room, "branch_changed_paths", return_value={"app/ui.tsx"}), \
+             mock.patch.object(room, "merge_conflict_paths", return_value=set()), \
+             mock.patch.object(room, "changed_worktree_paths", return_value=set()), \
+             mock.patch.object(room, "MAX_CONFLICT_PROBES", 2), \
+             tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store:
+            verdict = store.merge_readiness(repo, "main")
+        self.assertEqual(verdict["pairs_nominated"], 6, "every pair shares a file, so all six are nominated")
+        self.assertEqual(verdict["pairs_probed"], 2, "the cap was not applied")
+        self.assertFalse(verdict["complete"])
+        self.assertIn("floor, not a total", verdict["detail"])
+
+    def test_merge_readiness_claims_completeness_only_when_it_has_it(self):
+        repo = self.repo()
+        worktrees = [{"target": f"#lane-{i}", "name": f"lane-{i}", "path": f"/project/{i}", "branch": f"lane-{i}"} for i in range(3)]
+        with mock.patch.object(room, "list_worktree_references", return_value=worktrees), \
+             mock.patch.object(room, "branch_changed_paths", return_value={"app/ui.tsx"}), \
+             mock.patch.object(room, "merge_conflict_paths", return_value=set()), \
+             mock.patch.object(room, "changed_worktree_paths", return_value=set()), \
+             tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store:
+            verdict = store.merge_readiness(repo, "main")
+        self.assertTrue(verdict["complete"])
+        self.assertNotIn("detail", verdict)
+
     def test_a_truncated_conflict_scan_says_so(self):
         repo = self.repo()
         room.CONFLICT_SCANS.clear()
