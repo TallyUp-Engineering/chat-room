@@ -387,7 +387,10 @@ class RoomTests(unittest.TestCase):
         doc = (MODULE.parents[3] / "docs" / "architecture.md").read_text(encoding="utf-8")
         named = set(re.findall(r"`(test_[a-z0-9_]+)`", doc))
         self.assertGreaterEqual(len(named), 10, "architecture.md lists suspiciously few constraints")
-        defined = set(re.findall(r"def (test_[a-z0-9_]+)", (MODULE.parents[3] / "tests" / "test_room.py").read_text(encoding="utf-8")))
+        suites = (MODULE.parents[3] / "tests")
+        defined = set()
+        for suite in sorted(suites.glob("test_*.py")):
+            defined |= set(re.findall(r"def (test_[a-z0-9_]+)", suite.read_text(encoding="utf-8")))
         self.assertEqual(named - defined, set(), "architecture.md names tests that no longer exist")
 
     def test_every_named_option_key_survives_slugging(self):
