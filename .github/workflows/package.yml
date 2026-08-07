@@ -4,14 +4,21 @@ name: Package
 # gets published is the one that was built and inspected, and a failed publish never
 # silently rebuilds from a different tree.
 #
-# A release goes to TestPyPI first and is installed back from that real index before PyPI
-# sees it. Publishing to PyPI cannot be undone and yanking is deliberately manual — the
-# route requires re-authentication and exists only in the web UI — so the last chance to
-# catch a bad artifact has to come before the irreversible step, not after it.
+# A release is installed back out of a package index before PyPI sees it. Publishing to
+# PyPI cannot be undone and yanking is deliberately manual — Warehouse exposes it only
+# through the web UI, behind a re-authentication challenge — so the last chance to catch a
+# bad artifact has to come before the irreversible step, not after it.
 #
-# Needs Trusted Publishing configured once on each index for this repository and the
-# workflow filename `package.yml`, with GitHub environments named `testpypi` and `pypi`.
-# Until they exist the build job still runs on every tag and only publishing fails.
+# That index is served locally rather than being TestPyPI. TestPyPI refuses the name: it
+# already carries a `chatroom`, and Warehouse rejects any name whose separators normalize
+# onto an existing one. Rehearsing under a different name would rehearse a different
+# artifact, which is worse than not rehearsing at all. A local index needs no account, has
+# no propagation lag, and exercises the same path that matters — resolving a name and a
+# version over HTTP instead of being handed a file.
+#
+# Publishing needs Trusted Publishing configured once for this repository and the workflow
+# filename `package.yml`, with a GitHub environment named `pypi`. Until that exists the
+# build job still runs on every tag and only publishing fails.
 
 on:
   push:
@@ -98,69 +105,65 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  rehearse:
-    name: publish to TestPyPI
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    environment:
-      name: testpypi
-      url: https://test.pypi.org/p/chat-room
-    permissions:
-      id-token: write
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          name: distributions
-          path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
-          # TestPyPI is a rehearsal, not a record. A re-run of the same tag must not fail
-          # here just because the rehearsal already happened.
-          skip-existing: true
-
   verify:
-    name: install from the index and run it
-    needs: rehearse
+    name: install it out of an index and run it
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
+      - uses: actions/download-artifact@v8
+        with:
+          name: distributions
+          path: dist/
 
-      # The point of this job: nothing so far has installed the artifact from a package
-      # index. Chat Room depends on nothing outside the standard library, so TestPyPI can
-      # satisfy it alone — no fallback to PyPI, which would hide a broken upload.
-      - name: Install the published version from TestPyPI
+      # Everything up to here handed pip a file path. This makes it resolve a name and a
+      # version out of an index over HTTP, which is what a user's install actually does.
+      - name: Serve the distributions as a PEP 503 index
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          python -m venv /tmp/rehearsal
-          for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            if /tmp/rehearsal/bin/pip install --disable-pip-version-check \
-                 --index-url https://test.pypi.org/simple/ "chat-room==$version"; then
-              installed=yes; break
-            fi
-            echo "not on the index yet; attempt $attempt"
-            sleep 15
+          python - <<'SCRIPT'
+          import html, pathlib
+          root = pathlib.Path("index/simple/chat-room")
+          root.mkdir(parents=True)
+          links = []
+          for artifact in sorted(pathlib.Path("dist").iterdir()):
+              (root / artifact.name).write_bytes(artifact.read_bytes())
+              links.append(f'<a href="{html.escape(artifact.name)}">{html.escape(artifact.name)}</a><br>')
+          root.joinpath("index.html").write_text("<!DOCTYPE html><html><body>" + "".join(links) + "</body></html>")
+          pathlib.Path("index/simple/index.html").write_text(
+              '<!DOCTYPE html><html><body><a href="chat-room/">chat-room</a></body></html>')
+          print("serving:", [item.name for item in sorted(root.iterdir())])
+          SCRIPT
+          (cd index && nohup python -m http.server 8899 >/dev/null 2>&1 &)
+          for _ in $(seq 1 20); do
+            curl -sf http://127.0.0.1:8899/simple/chat-room/ >/dev/null && exit 0
+            sleep 0.5
           done
-          [ "${installed:-no}" = "yes" ] || { echo "::error::chat-room $version never appeared on TestPyPI"; exit 1; }
+          echo "::error::the local index never came up"; exit 1
 
-      - name: Run it, and confirm it carries its data files
+      - name: Install by name and version, from that index and nothing else
         run: |
+          version=$(ls dist/*.whl | sed -E 's/.*chat_room-([^-]+)-.*/\1/')
+          echo "resolving chat-room==$version from the local index"
+          python -m venv /tmp/rehearsal
+          /tmp/rehearsal/bin/pip install --disable-pip-version-check \
+            --index-url http://127.0.0.1:8899/simple/ "chat-room==$version"
           /tmp/rehearsal/bin/chat-room --version
           /tmp/rehearsal/bin/chat-room doctor
-          /tmp/rehearsal/bin/python - <<'PY'
+
+      - name: Confirm the installed copy still carries its data files
+        run: |
+          /tmp/rehearsal/bin/python - <<'SCRIPT'
           import pathlib, chat_room
           root = pathlib.Path(chat_room.__file__).parent
-          skills = sorted(p.parent.name for p in root.rglob("SKILL.md"))
-          manifests = [name for name in (".mcp.json", "hooks/hooks.json", ".codex-plugin/plugin.json") if (root / name).exists()]
-          print("skills:", skills, "manifests:", manifests)
+          skills = sorted(item.parent.name for item in root.rglob("SKILL.md"))
+          missing = [name for name in (".mcp.json", "hooks/hooks.json", ".codex-plugin/plugin.json") if not (root / name).exists()]
+          print("skills:", skills)
           assert skills, "the installed package carries no skills"
-          assert len(manifests) == 3, f"the installed package is missing manifests: {manifests}"
-          PY
+          assert not missing, f"the installed package is missing {missing}"
+          SCRIPT
 
   publish:
     name: publish to PyPI
