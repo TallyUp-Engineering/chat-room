@@ -321,27 +321,33 @@ class RoomTests(unittest.TestCase):
                 "source": str(source),
             }
             engine = CHAT_INDEX.build_engine(Path(temp))
-            self.assertEqual(CHAT_INDEX.backfill(engine, [transcript]), {"indexed": 1, "skipped": 0})
-            # An unchanged source is never re-read.
-            self.assertEqual(CHAT_INDEX.backfill(engine, [transcript]), {"indexed": 0, "skipped": 1})
+            # Windows will not remove a directory whose file is still open, and the
+            # connection pool holds it until the engine is disposed. This has to happen
+            # before the temporary directory is removed, so it cannot be an addCleanup.
+            try:
+                self.assertEqual(CHAT_INDEX.backfill(engine, [transcript]), {"indexed": 1, "skipped": 0})
+                # An unchanged source is never re-read.
+                self.assertEqual(CHAT_INDEX.backfill(engine, [transcript]), {"indexed": 0, "skipped": 1})
 
-            counts = CHAT_INDEX.summary(engine)
-            self.assertEqual((counts["actors"], counts["chats"], counts["turns"]), (1, 1, 2))
+                counts = CHAT_INDEX.summary(engine)
+                self.assertEqual((counts["actors"], counts["chats"], counts["turns"]), (1, 1, 2))
 
-            found = CHAT_INDEX.search_turns(engine, "merge-tree")
-            self.assertEqual([item["body"] for item in found], ["please run the merge-tree check"])
-            self.assertEqual(found[0]["client"], "claude")
-            self.assertEqual(found[0]["title"], "Rebuild the projection")
-            # A wildcard is matched literally rather than widening the search.
-            self.assertEqual(CHAT_INDEX.search_turns(engine, "%"), [])
-            self.assertEqual(CHAT_INDEX.search_turns(engine, "   "), [])
+                found = CHAT_INDEX.search_turns(engine, "merge-tree")
+                self.assertEqual([item["body"] for item in found], ["please run the merge-tree check"])
+                self.assertEqual(found[0]["client"], "claude")
+                self.assertEqual(found[0]["title"], "Rebuild the projection")
+                # A wildcard is matched literally rather than widening the search.
+                self.assertEqual(CHAT_INDEX.search_turns(engine, "%"), [])
+                self.assertEqual(CHAT_INDEX.search_turns(engine, "   "), [])
 
-            # A rewritten transcript must not leave stale turns behind.
-            source.write_text("placeholder rewritten\n")
-            transcript["messages"] = [{"role": "user", "body": "different question", "timestamp": "2026-08-06T20:00:00Z"}]
-            self.assertEqual(CHAT_INDEX.backfill(engine, [transcript]), {"indexed": 1, "skipped": 0})
-            self.assertEqual(CHAT_INDEX.summary(engine)["turns"], 1)
-            self.assertEqual(CHAT_INDEX.search_turns(engine, "merge-tree"), [])
+                # A rewritten transcript must not leave stale turns behind.
+                source.write_text("placeholder rewritten\n")
+                transcript["messages"] = [{"role": "user", "body": "different question", "timestamp": "2026-08-06T20:00:00Z"}]
+                self.assertEqual(CHAT_INDEX.backfill(engine, [transcript]), {"indexed": 1, "skipped": 0})
+                self.assertEqual(CHAT_INDEX.summary(engine)["turns"], 1)
+                self.assertEqual(CHAT_INDEX.search_turns(engine, "merge-tree"), [])
+            finally:
+                engine.dispose()
 
     @unittest.skipUnless(CHAT_INDEX, "optional transcript index not installed")
     def test_index_reports_an_unreachable_store_without_a_traceback(self):
