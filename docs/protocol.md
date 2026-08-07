@@ -63,7 +63,8 @@ Each accepts `--cwd` to name the worktree it acts in.
 | `chat-room members` | Observed sessions and presence. |
 | `chat-room targets` | Active `@agent` and `#worktree` targets. |
 | `chat-room threads` | Open manual and merge-conflict coordination threads. |
-| `chat-room alerts` | Shared worktrees, overlaps, decisions, and stale lanes. |
+| `chat-room alerts` | Shared worktrees, overlaps, decisions, and stale lanes, at whatever height the rules put them. |
+| `chat-room rules` | Every house rule, the rung it sits at, and whether anyone has decided it. |
 | `chat-room chats` | Local CLI conversations discovered for this project. |
 | `chat-room ready` | Which worktree branches merge cleanly into `--into`, and which collide. |
 | `chat-room projects` | Every project with a room on this machine, worktrees grouped under it. |
@@ -90,6 +91,31 @@ Each accepts `--cwd` to name the worktree it acts in.
 
 `chat-room start` and `chat-room send` run real vendor CLI turns and bill vendor tokens.
 `--image` on `send` references files already on this machine; they are never copied.
+
+## House rules
+
+A rule names a condition the room can already observe. Its value is the **rung**, and
+nothing else in the room decides how loudly the condition lands.
+
+| Rung | Effect |
+|---|---|
+| `off` | the condition is not reported at all |
+| `advise` | reported in `chat-room alerts`; the default for every rule |
+| `warn` | reported, and carried into every session's injected context |
+| `refuse` | reported, carried, and stated as binding |
+
+Rules live in the `rules` option namespace, so `chat-room option-set --namespace rules`
+sets one and no separate write command exists. A rule nobody has set reports its default
+and `decided: false`; the difference between a default and an answer is what lets an
+interrogation ask only what is still open.
+
+`refuse` is binding on every agent that reads its injected context. It is not mechanically
+blocked — the room opens no listening socket and holds no authority over Git — and
+`chat-room rules` reports `mechanically_enforced: false` rather than implying otherwise.
+
+Every rule is evaluated from cheap, cached observations, because they run on the hook path.
+The expensive question — does this branch still merge into the integration branch — stays in
+`chat-room ready`, where a human asked for it and can wait.
 
 ## Carrying tags into sessions
 

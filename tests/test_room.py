@@ -538,6 +538,55 @@ class RoomTests(unittest.TestCase):
                 history = room.chat_transcript(repo, "Codex", "session-all")
             self.assertEqual(len(history["messages"]), 1005)
 
+    def test_a_rule_nobody_set_reports_its_default_as_undecided(self):
+        # The difference between a default and an answer is what lets an interrogation
+        # ask only what is still open, so it has to survive a round trip.
+        with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store:
+            rules = store.rules()
+            self.assertEqual({name for name, *_ in room.RULE_CATALOG}, set(rules))
+            self.assertTrue(all(item["rung"] == item["default"] and not item["decided"] for item in rules.values()))
+            store.set_option("rules", "one-actor-per-worktree", "refuse")
+            settled = store.rules()["one-actor-per-worktree"]
+            self.assertEqual(settled["rung"], "refuse")
+            self.assertTrue(settled["decided"])
+            # The room cannot block a write, and must not claim it can.
+            self.assertFalse(settled["mechanically_enforced"])
+
+    def test_an_unknown_rung_falls_back_rather_than_suppressing_the_rule(self):
+        with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store:
+            store.set_option("rules", "file-overlap", "sometimes")
+            self.assertEqual(store.rules()["file-overlap"]["rung"], "advise")
+
+    def test_the_rung_decides_whether_a_condition_is_reported_and_how_loudly(self):
+        targets = {"agents": [], "worktrees": [{"target": "#one", "path": "/p/one", "active_agents": 2, "age_days": 0}]}
+        heights = {rung: room.coordination_alerts(targets, [], {"one-actor-per-worktree": {"rung": rung}}) for rung in room.RULE_RUNGS}
+        self.assertEqual(heights["off"], [])
+        self.assertEqual([item["severity"] for item in heights["advise"]], ["warning"])
+        self.assertEqual([item["severity"] for item in heights["warn"]], ["attention"])
+        self.assertEqual([item["severity"] for item in heights["refuse"]], ["critical"])
+        self.assertEqual(heights["refuse"][0]["rule"], "one-actor-per-worktree")
+
+    def test_the_stale_threshold_is_the_operators_number(self):
+        targets = {"agents": [], "worktrees": [{"target": "#old", "path": "/p/old", "active_agents": 0, "age_days": 10}]}
+        rules = {"stale-worktrees": {"rung": "advise", "parameter": 30}}
+        self.assertEqual(room.coordination_alerts(targets, [], rules), [])
+        rules["stale-worktrees"]["parameter"] = 7
+        stale = room.coordination_alerts(targets, [], rules)
+        self.assertEqual([item["type"] for item in stale], ["stale-worktrees"])
+        self.assertIn("7 days", stale[0]["title"])
+
+    def test_only_a_raised_rule_reaches_a_session_context(self):
+        # An advisory default in every turn would be noise; a raised rule has to travel,
+        # because injected context is the only way a hard rule reaches an agent.
+        repo = self.repo()
+        with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store:
+            store.upsert_presence(repo, "session:one", "one", None, "claude:lane", "online", "SessionStart")
+            self.assertNotIn("House rules", room.compact_context(store, repo, "session:one", "SessionStart"))
+            store.set_option("rules", "one-actor-per-worktree", "refuse")
+            context = room.compact_context(store, repo, "session:one", "SessionStart")
+            self.assertIn("one-actor-per-worktree (refuse)", context)
+            self.assertIn("binding", context)
+
     def test_chat_recency_defines_recent_and_inactive(self):
         self.assertEqual(room.chat_recency(room.utc_now()), "recent")
         self.assertEqual(room.chat_recency("2000-01-01T00:00:00Z"), "inactive")

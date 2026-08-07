@@ -4,6 +4,7 @@ import {
   invariants,
   mcpTools,
   readCommands,
+  rungs,
   spans,
   tagline,
   version,
@@ -76,6 +77,7 @@ export function ChatRoom() {
               <Group label="Read" entries={readCommands} />
               <Group label="Write" entries={writeCommands} />
               <Group label="MCP tools" entries={mcpTools} />
+              <Group label="Rule rungs" entries={rungs} />
             </section>
             <footer className="window-footer">
               <span>room: git:chat-room • advisory-only</span>
