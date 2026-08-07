@@ -1,0 +1,86 @@
+name: Site
+
+# The marketing site. Build and deploy are separate jobs for the same reason as the
+# package: what gets deployed is the artifact that was built and checked, and a
+# credential problem in the deploy never rebuilds a different tree.
+#
+# Deploying needs CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID as repository secrets
+# and a GitHub environment named `production`. Without them the build job still runs on
+# every push and only the deploy job fails.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - app/**
+      - worker/**
+      - public/**
+      - build/**
+      - docs/protocol.md            # the page is generated from it
+      - plugins/chat-room/.codex-plugin/plugin.json
+      - package.json
+      - package-lock.json
+      - vite.config.ts
+      - next.config.ts
+      - .github/workflows/site.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  # A newer commit should win the deploy rather than race an older one, but never
+  # cancel a deploy already talking to Cloudflare.
+  group: site-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build site
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+      # The page generates its command and tool reference from docs/protocol.md, so a
+      # broken generator would deploy a page that is merely missing content rather than
+      # failing. These are the tests that assert it published what the document declares.
+      - run: node --test tests/rendered-html.test.mjs
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: site
+          path: dist/
+          if-no-files-found: error
+
+  deploy:
+    name: deploy to Cloudflare
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: production
+      url: https://worktree.chat
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: site
+          path: dist/
+      - uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # vinext writes the worker manifest beside the build output; deploying that
+          # file is what makes this the built artifact rather than a fresh build.
+          command: deploy --config dist/server/wrangler.json
