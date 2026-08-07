@@ -6,7 +6,7 @@
       "name": "chat-room",
       "source": { "source": "local", "path": "./plugins/chat-room" },
       "description": "Local chat histories, coordination threads, and worktree-aware routing for humans and coding agents.",
-      "version": "0.6.0"
+      "version": "0.7.0"
     }
   ]
 }

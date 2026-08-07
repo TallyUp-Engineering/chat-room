@@ -1,8 +1,4 @@
 import importlib.util
-import contextlib
-import http.client
-import threading
-from http import HTTPStatus
 import io
 import json
 import os
@@ -90,43 +86,6 @@ class RoomTests(unittest.TestCase):
     def test_hook_fails_open_outside_git(self):
         with mock.patch.object(room, "resolve_repository", return_value=None), mock.patch("sys.stdin") as stdin, mock.patch("sys.stdout") as stdout:
             stdin.__iter__.return_value = iter([]); stdin.read.return_value = ""
-
-    def test_ui_pins_combined_room_and_groups_interface_sessions(self):
-        assets = MODULE.parents[1] / "assets"
-        html = (assets / "index.html").read_text()
-        script = (assets / "room.js").read_text()
-        self.assertIn("Command Console", html)
-        self.assertIn("Human in the Loop", html)
-        self.assertIn("Chatter", html)
-        self.assertIn('id="suggestions"', html)
-        self.assertNotIn("Needs attention", html)
-        self.assertIn('id="chats"', html)
-        self.assertIn('id="active-agents"', html)
-        self.assertIn('id="human-thread-form"', html)
-        self.assertNotIn('id="worktrees"', html)
-        self.assertIn("openHistory", script)
-        self.assertIn("openThread", script)
-        self.assertIn("/api/chat-send", script)
-        self.assertIn("/api/rename", script)
-        self.assertIn("new WebSocket", script)
-        self.assertIn("clipboardData", script)
-        self.assertIn('value="all"', html)
-        self.assertIn('value="tag"', html)
-        self.assertIn("renderRouting", script)
-        self.assertIn("What do you want to activate?", script)
-        self.assertIn("View room log", script)
-        self.assertIn('id="composer" hidden', html)
-        self.assertNotIn("Open in CLI", script)
-        self.assertIn('#room-routing[hidden]', (assets / "room.css").read_text())
-        self.assertNotIn("setInterval(refreshRoom", script)
-        # Everything a terminal was still needed for has a control in the room.
-        self.assertIn('id="search-form"', html)
-        self.assertIn('id="stop-turn"', html)
-        self.assertIn('id="unread-count"', html)
-        self.assertIn("Start new work", script)
-        self.assertIn("/api/session-start", script)
-        self.assertIn("/api/session-stop", script)
-        self.assertIn("/api/search", script)
 
     def test_terminal_chat_registers_and_releases_cli_presence(self):
         repo = self.repo()
@@ -393,109 +352,6 @@ class RoomTests(unittest.TestCase):
             # The message locates the store without repeating the credentials in it.
             self.assertNotIn("secret", str(unreachable.exception))
 
-    @contextlib.contextmanager
-    def http_server(self):
-        """A real loopback server over a real Git worktree.
-
-        The handler is where the token gate, the host check, and every body limit
-        actually live, so they are asserted against requests rather than by reading
-        the source.
-        """
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp) / "project"
-            root.mkdir()
-
-            def git(*args):
-                subprocess.run(["git", "-C", str(root), *args], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-            git("init", "-q", "-b", "main")
-            git("config", "user.email", "test@example.test")
-            git("config", "user.name", "Test")
-            (root / "readme.txt").write_text("hello\n")
-            git("add", "."); git("commit", "-qm", "base")
-
-            repo = room.resolve_repository(str(root))
-            token = "a" * 32
-            server = room.RoomHTTPServer(
-                ("127.0.0.1", 0), repo, Path(temp) / "data", MODULE.parents[1] / "assets",
-                token, "localhost", 0, room.EventHub(),
-            )
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            try:
-                yield f"127.0.0.1:{server.server_address[1]}", token, root
-            finally:
-                server.shutdown()
-                server.server_close()
-                thread.join(timeout=5)
-
-    @staticmethod
-    def request(authority, method="GET", path="/", token=None, body=None, host=None):
-        connection = http.client.HTTPConnection(authority, timeout=10)
-        headers = {"Host": host or authority}
-        if token:
-            headers["X-Chat-Room-Token"] = token
-        if body is not None:
-            headers["Content-Type"] = "application/json"
-        try:
-            connection.request(method, path, body=json.dumps(body) if body is not None else None, headers=headers)
-            response = connection.getresponse()
-            return response.status, response.read().decode("utf-8", "replace")
-        finally:
-            connection.close()
-
-    def test_http_serves_the_room_and_gates_every_api_on_the_local_token(self):
-        with self.http_server() as (authority, token, _root):
-            status, page = self.request(authority)
-            self.assertEqual(status, 200)
-            self.assertIn("<title>Chat Room</title>", page)
-
-            # Static assets the page needs are readable; anything else is not served.
-            for asset in ("/room.css", "/room.js", "/icons.svg"):
-                self.assertEqual(self.request(authority, path=asset)[0], 200, asset)
-            self.assertEqual(self.request(authority, path="/../room.py")[0], 404)
-            self.assertEqual(self.request(authority, path="/api/nothing")[0], 404)
-
-            # Every API read requires the local token, including the snapshot.
-            for path in ("/api/snapshot", "/api/search?q=x", "/api/chats"):
-                self.assertEqual(self.request(authority, path=path)[0], 403, path)
-                self.assertEqual(self.request(authority, path=path, token=token)[0], 200, path)
-
-            # And so does every write.
-            self.assertEqual(self.request(authority, "POST", "/api/messages", body={"message": "hi"})[0], 403)
-
-    def test_http_refuses_a_foreign_host_header(self):
-        with self.http_server() as (authority, token, _root):
-            status, _ = self.request(authority, path="/api/snapshot", token=token, host="chat-room.example.test")
-            self.assertEqual(status, HTTPStatus.MISDIRECTED_REQUEST)
-
-    def test_http_write_paths_report_their_refusals(self):
-        with self.http_server() as (authority, token, root):
-            status, body = self.request(authority, "POST", "/api/messages", token=token, body={"message": "coordination note", "kind": "message", "topic": "general"})
-            self.assertEqual(status, 201, body)
-
-            # Oversized bodies are refused before they are read.
-            status, _ = self.request(authority, "POST", "/api/messages", token=token, body={"message": "x" * 20000})
-            self.assertEqual(status, 413)
-
-            # A credential-shaped message never reaches storage.
-            status, body = self.request(authority, "POST", "/api/messages", token=token, body={"message": "password=hunter2hunter2"})
-            self.assertEqual(status, 400)
-            self.assertIn("value-free", body)
-
-            # Starting a session outside this project is refused by path, not by luck.
-            status, body = self.request(authority, "POST", "/api/session-start", token=token, body={"client": "claude", "worktree": "/", "prompt": "no"})
-            self.assertEqual(status, 400)
-            self.assertIn("does not belong", body)
-
-            # An unsupported client never reaches a subprocess.
-            status, _ = self.request(authority, "POST", "/api/session-start", token=token, body={"client": "emacs", "worktree": str(root), "prompt": "no"})
-            self.assertEqual(status, 400)
-
-            # Stopping a turn nobody started is an error, not a crash.
-            self.assertEqual(self.request(authority, "POST", "/api/session-stop", token=token, body={"client": "claude", "session_id": "missing"})[0], 400)
-            self.assertEqual(self.request(authority, "POST", "/api/unknown", token=token, body={})[0], 404)
-
     def test_the_protocol_document_matches_the_code(self):
         # The contract drifted once already: the document advertised seven tools when
         # there were fifteen. It is only a contract if it fails when it stops being true.
@@ -505,10 +361,10 @@ class RoomTests(unittest.TestCase):
         self.assertEqual(implemented_tools - documented_tools, set(), "undocumented MCP tools")
         self.assertEqual(documented_tools - implemented_tools, set(), "documented tools that do not exist")
 
-        documented_routes = set(re.findall(r"`(/api/[a-z-]+)`", protocol))
-        implemented_routes = set(room.HTTP_READ_ROUTES) | set(room.HTTP_WRITE_ROUTES)
-        self.assertEqual(implemented_routes - documented_routes, set(), "undocumented HTTP routes")
-        self.assertEqual(documented_routes - implemented_routes, set(), "documented routes that do not exist")
+        documented_commands = set(re.findall(r"`chat-room ([a-z-]+)`", protocol))
+        implemented_commands = set(room.parser()._subparsers._group_actions[0].choices)
+        self.assertEqual(implemented_commands - documented_commands, set(), "undocumented CLI commands")
+        self.assertEqual(documented_commands - implemented_commands, set(), "documented commands that do not exist")
 
     def test_shared_tables_are_never_written_positionally(self):
         # Several versions of this script share one database on a machine. A positional
@@ -587,7 +443,9 @@ class RoomTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp, room.RoomStore(Path(temp)) as store, mock.patch.object(room, "list_worktree_references", return_value=worktrees):
             store.upsert_presence(repo, "session:one", "claude-session-one", None, "claude:lane", "online", "Stop")
-            with mock.patch.object(room, "spawn_cli_turn", return_value={"process": FakeProcess(), "log": "x", "client": "claude"}) as spawn:
+            # Pinned under the cooldown: a freshly booted machine reports a small
+            # monotonic clock, and a never-delivered session must still be reachable.
+            with mock.patch.object(room, "spawn_cli_turn", return_value={"process": FakeProcess(), "log": "x", "client": "claude"}) as spawn, mock.patch.object(room.time, "monotonic", return_value=3.0):
                 posted = store.post(repo, "@human", "message", "general", "posted", "@claude-lane please rebase", [])
             self.assertEqual(posted["wake"]["started"], ["@claude-lane"])
             self.assertIn("please rebase", spawn.call_args[0][3])
@@ -680,18 +538,6 @@ class RoomTests(unittest.TestCase):
                 history = room.chat_transcript(repo, "Codex", "session-all")
             self.assertEqual(len(history["messages"]), 1005)
 
-    def test_ui_defaults_to_durable_loopback_name(self):
-        args = room.parser().parse_args(["ui"])
-        self.assertEqual(args.hostname, "chatroom.localhost")
-        self.assertEqual(args.port, 7391)
-
-    def test_ui_reuses_an_already_running_chat_room_without_traceback(self):
-        occupied = OSError(room.errno.EADDRINUSE, "Address already in use")
-        with tempfile.TemporaryDirectory() as temp, mock.patch.object(room, "select_repository", return_value=self.repo()), mock.patch.object(room, "RoomHTTPServer", side_effect=occupied), mock.patch.object(room, "running_room_url", return_value="http://chatroom.localhost:7391/"), mock.patch.object(room.webbrowser, "open") as opened, mock.patch("sys.stdout", io.StringIO()) as output:
-            self.assertEqual(room.run_ui(Path(temp), None, "127.0.0.1", 7391, "chatroom.localhost", None, False), 0)
-        opened.assert_called_once_with("http://chatroom.localhost:7391/")
-        self.assertIn("already running", output.getvalue())
-
     def test_chat_recency_defines_recent_and_inactive(self):
         self.assertEqual(room.chat_recency(room.utc_now()), "recent")
         self.assertEqual(room.chat_recency("2000-01-01T00:00:00Z"), "inactive")
@@ -709,14 +555,13 @@ class RoomTests(unittest.TestCase):
         self.assertEqual(state["mode"], "active-unattached")
         self.assertEqual(state["label"], "Active elsewhere")
 
-    def test_cli_discovery_survives_a_minimal_service_path(self):
+    def test_cli_discovery_survives_a_minimal_path(self):
         with tempfile.TemporaryDirectory() as temp, mock.patch.object(room.shutil, "which", return_value=None), mock.patch.object(room.Path, "home", return_value=Path(temp)):
             executable = Path(temp) / ".local" / "bin" / "codex"
             executable.parent.mkdir(parents=True)
             executable.write_text("#!/bin/sh\n")
             executable.chmod(0o755)
             self.assertEqual(room.find_cli_executable("codex"), str(executable))
-        self.assertIn("/opt/homebrew/bin", room.service_path().split(os.pathsep))
 
     def test_chat_delivery_passes_prompt_on_stdin_not_process_arguments(self):
         repo = self.repo()
@@ -737,32 +582,31 @@ class RoomTests(unittest.TestCase):
         self.assertEqual(value["status"], "started")
         room.CHAT_DELIVERIES.clear()
 
-    def test_chat_images_are_bounded_private_and_passed_to_codex(self):
+    def test_chat_images_are_bounded_and_passed_to_codex(self):
         repo = self.repo()
         summary = {"client": "Codex", "id": "session-image", "cwd": "/project/lane", "worktree": "lane"}
-        attachment = {"name": "paste.png", "type": "image/png", "data": "data:image/png;base64,iVBORw0KGgo="}
         class Sink:
             def write(self, _value): return None
             def close(self): return None
         process = mock.Mock(pid=43, stdin=Sink())
         process.poll.return_value = None
-        with tempfile.TemporaryDirectory() as temp, mock.patch.object(room, "discover_chat_catalog", return_value=([summary], {})), mock.patch.object(room, "path_belongs_to_room", return_value=True), mock.patch.object(room.shutil, "which", return_value="/usr/local/bin/codex"), mock.patch.object(room.subprocess, "Popen", return_value=process) as popen:
-            value = room.start_chat_delivery(Path(temp), repo, "Codex", "session-image", "review this", [], [attachment])
+        with tempfile.TemporaryDirectory() as temp:
+            picture = Path(temp) / "paste.png"
+            picture.write_bytes(b"\x89PNG\r\n\x1a\n")
+            with self.assertRaises(room.RoomError):
+                room.chat_images([str(picture)] * (room.MAX_CHAT_IMAGES + 1))
+            with self.assertRaises(room.RoomError):
+                room.chat_images([str(Path(temp) / "absent.png")])
+            images = room.chat_images([str(picture)])
+            with mock.patch.object(room, "discover_chat_catalog", return_value=([summary], {})), mock.patch.object(room, "path_belongs_to_room", return_value=True), mock.patch.object(room.shutil, "which", return_value="/usr/local/bin/codex"), mock.patch.object(room.subprocess, "Popen", return_value=process) as popen:
+                value = room.start_chat_delivery(Path(temp), repo, "Codex", "session-image", "review this", [], images)
             command = popen.call_args.args[0]
-            image_path = Path(command[command.index("--image") + 1])
-            self.assertEqual(stat.S_IMODE(image_path.stat().st_mode), 0o600)
-            self.assertEqual(image_path.read_bytes(), b"\x89PNG\r\n\x1a\n")
+            self.assertEqual(command[command.index("--image") + 1], str(picture.resolve()))
             self.assertNotIn("review this", command)
             self.assertEqual(value["images"], 1)
+            # The caller keeps its own file; delivery never consumes it.
+            self.assertTrue(picture.exists())
         room.CHAT_DELIVERIES.clear()
-
-    def test_event_hub_preserves_indexed_event_order(self):
-        hub = room.EventHub()
-        receiver = hub.subscribe()
-        hub.publish("workspace.changed", {"path": "/api/messages"})
-        hub.publish("workspace.changed", {"path": "/api/threads"})
-        self.assertEqual([receiver.get_nowait()["sequence"], receiver.get_nowait()["sequence"]], [1, 2])
-        hub.unsubscribe(receiver)
 
     def test_room_and_chat_renames_are_local_index_overlays(self):
         repo = self.repo()

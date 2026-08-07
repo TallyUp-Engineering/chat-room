@@ -5,13 +5,9 @@ from __future__ import annotations
 
 import argparse
 import base64
-import binascii
-import errno
 import hashlib
 import json
 import os
-import plistlib
-import queue
 import re
 import select
 import shutil
@@ -23,19 +19,14 @@ import subprocess
 import sys
 import threading
 import time
-import webbrowser
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple
-from urllib.parse import parse_qs, urlparse
-from urllib.request import Request, urlopen
 
 
 PLUGIN_NAME = "chat-room"
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 SCHEMA_VERSION = 6
 ACTIVE_WINDOW_SECONDS = 30 * 60
 WAKE_ENDPOINT_ENV = "CHAT_ROOM_WAKE_ENDPOINT"
@@ -63,23 +54,11 @@ CHAT_CATALOG_LOCK = threading.Lock()
 CHAT_CATALOGS: Dict[str, Tuple[float, List[Dict[str, Any]], Dict[Tuple[str, str], Path]]] = {}
 CHAT_DELIVERY_LOCK = threading.Lock()
 CHAT_DELIVERIES: Dict[Tuple[str, str], Dict[str, Any]] = {}
-MAX_CHAT_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_CHAT_IMAGES = 5
-IMAGE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif"}
 CONFLICT_SCAN_TTL_SECONDS = 30
 MAX_CONFLICT_PROBES = 40
 # One tag must not be able to bill a vendor turn on a loop.
 WAKE_COOLDOWN_SECONDS = 60
-# ponytail: the browser re-fetches this on every change signal, so it is a window, not
-# the archive. Raise it, or page the room log, if a room ever needs deeper scrollback.
-SNAPSHOT_MESSAGE_LIMIT = 300
-# The local HTTP surface, named once so the handler, the tests, and docs/protocol.md
-# cannot drift apart. Every one of these requires the per-process local token.
-HTTP_READ_ROUTES = ("/api/snapshot", "/api/search", "/api/chats", "/api/chat")
-HTTP_WRITE_ROUTES = (
-    "/api/messages", "/api/threads", "/api/thread-close", "/api/chat-send",
-    "/api/rename", "/api/session-start", "/api/session-stop",
-)
 CONFLICT_SCAN_LOCK = threading.Lock()
 CONFLICT_SCANS: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
 CONFLICT_SCANS_RUNNING: Set[str] = set()
@@ -657,9 +636,6 @@ def chat_delivery_state(summary: Dict[str, Any], members: Sequence[Dict[str, Any
         process = delivery.get("process") if delivery else None
         running = bool(process and process.poll() is None)
         if delivery and not running:
-            for path in delivery.get("attachments") or []:
-                try: Path(path).unlink()
-                except OSError: pass
             CHAT_DELIVERIES.pop(key, None)
     if running:
         return {"ready": False, "mode": "running", "label": "Agent is responding", "detail": "This conversation refreshes as the active agent responds."}
@@ -672,47 +648,6 @@ def chat_delivery_state(summary: Dict[str, Any], members: Sequence[Dict[str, Any
     if executable:
         return {"ready": True, "mode": "resume", "label": "Ready to continue", "detail": f"Starts one local {summary['client']} turn in this stored conversation with its normal configuration and safety rules."}
     return {"ready": False, "mode": "unavailable", "label": "View only", "detail": f"No local {summary.get('client') or 'vendor'} conversation adapter is available on this machine."}
-
-
-def materialize_chat_images(data_dir: Path, attachments: Sequence[Dict[str, Any]]) -> List[Path]:
-    if len(attachments) > MAX_CHAT_IMAGES:
-        raise RoomError(f"a chat turn supports at most {MAX_CHAT_IMAGES} images")
-    root = data_dir / "chat-images"; root.mkdir(parents=True, exist_ok=True)
-    result: List[Path] = []
-    try:
-        for item in attachments:
-            mime = str(item.get("type") or "").lower()
-            suffix = IMAGE_TYPES.get(mime)
-            encoded = str(item.get("data") or "")
-            if not suffix or not encoded:
-                raise RoomError("unsupported or empty chat image")
-            if encoded.startswith("data:"):
-                prefix, separator, encoded = encoded.partition(",")
-                if not separator or ";base64" not in prefix or not prefix.startswith(f"data:{mime};"):
-                    raise RoomError("chat image data URL does not match its media type")
-            try:
-                payload = base64.b64decode(encoded, validate=True)
-            except (ValueError, binascii.Error) as error:
-                raise RoomError("chat image is not valid base64") from error
-            if not payload or len(payload) > MAX_CHAT_IMAGE_BYTES:
-                raise RoomError(f"each chat image must be between 1 byte and {MAX_CHAT_IMAGE_BYTES // (1024 * 1024)} MiB")
-            path = root / f"{time.time_ns()}-{os.urandom(6).hex()}{suffix}"
-            old = os.umask(0o077)
-            try: path.write_bytes(payload)
-            finally: os.umask(old)
-            os.chmod(path, 0o600); result.append(path)
-        return result
-    except Exception:
-        for path in result:
-            try: path.unlink()
-            except OSError: pass
-        raise
-
-
-def cleanup_chat_images(paths: Sequence[Path]) -> None:
-    for path in paths:
-        try: path.unlink()
-        except OSError: pass
 
 
 def spawn_cli_turn(data_dir: Path, client: str, worktree: Path, body: str, session_id: Optional[str] = None, images: Sequence[Path] = ()) -> Dict[str, Any]:
@@ -755,9 +690,9 @@ def spawn_cli_turn(data_dir: Path, client: str, worktree: Path, body: str, sessi
     return {"process": process, "log": str(log_path), "client": normalized}
 
 
-def track_delivery(client: str, key: str, process: "subprocess.Popen[bytes]", images: Sequence[Path] = ()) -> None:
+def track_delivery(client: str, key: str, process: "subprocess.Popen[bytes]") -> None:
     with CHAT_DELIVERY_LOCK:
-        CHAT_DELIVERIES[(client, key)] = {"process": process, "attachments": [str(path) for path in images], "started_at": time.monotonic()}
+        CHAT_DELIVERIES[(client, key)] = {"process": process, "started_at": time.monotonic()}
 
 
 def running_delivery(client: str, key: str) -> bool:
@@ -799,8 +734,21 @@ def start_session(data_dir: Path, repo: Repository, client: str, worktree_value:
     return {"status": "started", "client": normalized, "worktree": str(worktree), "worktree_target": worktree_target(worktree), "pid": process.pid, "log": started["log"]}
 
 
-def start_chat_delivery(data_dir: Path, repo: Repository, client: str, session_id: str, message: str, members: Sequence[Dict[str, Any]], attachments: Sequence[Dict[str, Any]] = ()) -> Dict[str, Any]:
-    if not str(message).strip() and not attachments:
+def chat_images(values: Sequence[str]) -> List[Path]:
+    """Images come from the caller's own filesystem, so they are referenced, never copied."""
+    if len(values) > MAX_CHAT_IMAGES:
+        raise RoomError(f"a chat turn supports at most {MAX_CHAT_IMAGES} images")
+    result: List[Path] = []
+    for value in values:
+        path = Path(value).expanduser().resolve()
+        if not path.is_file():
+            raise RoomError(f"image does not exist: {value}")
+        result.append(path)
+    return result
+
+
+def start_chat_delivery(data_dir: Path, repo: Repository, client: str, session_id: str, message: str, members: Sequence[Dict[str, Any]], images: Sequence[Path] = ()) -> Dict[str, Any]:
+    if not str(message).strip() and not images:
         raise RoomError("chat turn must include text or an image")
     body = ensure_value_free(message) if str(message).strip() else "Please review the attached image(s)."
     summaries, _files = discover_chat_catalog(repo, force=True)
@@ -810,27 +758,17 @@ def start_chat_delivery(data_dir: Path, repo: Repository, client: str, session_i
     delivery = chat_delivery_state(summary, members)
     if not delivery["ready"]:
         raise RoomError(str(delivery["detail"]))
-    images = materialize_chat_images(data_dir, attachments)
     active = next((item for item in members if str(item.get("session_id") or "") == session_id and str(item.get("state") or "") != "offline"), None)
     if delivery["mode"] == "live" and active:
-        try: wake_codex(str(active["wake_endpoint"]), session_id, body, images)
-        except Exception:
-            cleanup_chat_images(images)
-            raise
-        threading.Timer(300, cleanup_chat_images, args=(images,)).start()
+        wake_codex(str(active["wake_endpoint"]), session_id, body, images)
         return {"status": "sent", "mode": "live", "session_id": session_id}
     normalized = str(summary["client"]).lower()
     worktree = Path(str(summary.get("cwd") or repo.worktree)).expanduser().resolve()
     if not path_belongs_to_room(worktree, repo, {}):
-        cleanup_chat_images(images)
         raise RoomError("chat worktree no longer belongs to this project")
-    try:
-        started = spawn_cli_turn(data_dir, normalized, worktree, body, session_id, images)
-    except Exception:
-        cleanup_chat_images(images)
-        raise
+    started = spawn_cli_turn(data_dir, normalized, worktree, body, session_id, images)
     process = started["process"]
-    track_delivery(normalized, session_id, process, images)
+    track_delivery(normalized, session_id, process)
     return {"status": "started", "mode": "resume", "session_id": session_id, "pid": process.pid, "images": len(images)}
 
 
@@ -1328,8 +1266,10 @@ class RoomStore:
             if message.get("session_id") == session_id or running_delivery(client, session_id):
                 continue
             with CHAT_DELIVERY_LOCK:
-                previous = CHAT_DELIVERIES.get((client, session_id), {})
-                recent = time.monotonic() - float(previous.get("started_at") or 0) < WAKE_COOLDOWN_SECONDS
+                # Absence means never delivered. Reading it as "delivered at monotonic 0"
+                # swallows the first tag on any machine whose uptime is under the cooldown.
+                previous = CHAT_DELIVERIES.get((client, session_id))
+                recent = previous is not None and time.monotonic() - float(previous.get("started_at") or 0) < WAKE_COOLDOWN_SECONDS
             if recent:
                 continue
             result["attempted"] += 1
@@ -1500,271 +1440,6 @@ def run_mcp(data_dir: Path) -> int:
     return 0
 
 
-class RoomHandler(BaseHTTPRequestHandler):
-    server_version = "ChatRoom/0.6"
-    def log_message(self, *_args: Any) -> None: return
-    @property
-    def app(self) -> "RoomHTTPServer": return self.server  # type: ignore[return-value]
-    def authorized(self) -> bool:
-        cookie = self.headers.get("Cookie", "")
-        return self.headers.get("X-Chat-Room-Token") == self.app.token or f"chat_room_token={self.app.token}" in cookie.split("; ")
-    def valid_host(self) -> bool:
-        value = self.headers.get("Host", "").lower()
-        host = value[1:value.find("]")] if value.startswith("[") and "]" in value else value.rsplit(":", 1)[0]
-        return host in {"127.0.0.1", "localhost", "::1", self.app.hostname}
-    def send_json(self, value: Any, status: int = 200) -> None:
-        payload = json.dumps(value, separators=(",", ":")).encode()
-        try:
-            self.send_response(status); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(payload))); self.send_header("Cache-Control", "no-store"); self.end_headers(); self.wfile.write(payload)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
-    def do_GET(self) -> None:
-        if not self.valid_host(): self.send_error(HTTPStatus.MISDIRECTED_REQUEST); return
-        parsed = urlparse(self.path); path = parsed.path
-        if path == "/api/snapshot":
-            if not self.authorized(): self.send_json({"error": "invalid local token"}, 403); return
-            with RoomStore(self.app.data_dir) as store:
-                threads = store.sync_preemptive_conflicts(self.app.repo)
-                targets = store.targets(self.app.repo)
-                options = store.options()
-                status = store.status(self.app.repo)
-                status["display_name"] = store.display_name("room_name", self.app.repo.room_id, self.app.repo.worktree.name or "Chat Room")
-                self.send_json({"status": status, "messages": store.recent(self.app.repo.room_id, SNAPSHOT_MESSAGE_LIMIT), "targets": targets, "threads": threads, "alerts": coordination_alerts(targets, threads), "options": options, "events_url": f"ws://{self.app.hostname}:{self.app.events_port}/events"})
-            return
-        if path == "/api/search":
-            if not self.authorized(): self.send_json({"error": "invalid local token"}, 403); return
-            query = parse_qs(parsed.query)
-            with RoomStore(self.app.data_dir) as store:
-                self.send_json({"messages": store.search(self.app.repo.room_id, str(query.get("q", [""])[0]))})
-            return
-        if path == "/api/chats":
-            if not self.authorized(): self.send_json({"error": "invalid local token"}, 403); return
-            chats, _files = discover_chat_catalog(self.app.repo)
-            with RoomStore(self.app.data_dir) as store:
-                for chat in chats:
-                    chat["title"] = store.display_name("chat_name", f"{chat['client']}-{chat['id']}", str(chat["title"]))
-            self.send_json({"chats": chats})
-            return
-        if path == "/api/chat":
-            if not self.authorized(): self.send_json({"error": "invalid local token"}, 403); return
-            query = parse_qs(parsed.query)
-            try:
-                value = chat_transcript(self.app.repo, str(query.get("client", [""])[0]), str(query.get("id", [""])[0]))
-                with RoomStore(self.app.data_dir) as store:
-                    value["chat"]["title"] = store.display_name("chat_name", f"{value['chat']['client']}-{value['chat']['id']}", str(value["chat"]["title"]))
-                    value["delivery"] = chat_delivery_state(value["chat"], store.members(self.app.repo.room_id))
-                self.send_json(value)
-            except RoomError as error:
-                self.send_json({"error": str(error)}, 404)
-            return
-        static = {"/": ("index.html", "text/html; charset=utf-8"), "/room.css": ("room.css", "text/css"), "/room.js": ("room.js", "text/javascript"), "/icons.svg": ("icons.svg", "image/svg+xml")}
-        if path in static:
-            file_name, mime = static[path]; payload = (self.app.static_dir / file_name).read_bytes()
-            self.send_response(200); self.send_header("Content-Type", mime); self.send_header("Content-Length", str(len(payload))); self.send_header("Cache-Control", "no-store")
-            if path == "/": self.send_header("Set-Cookie", f"chat_room_token={self.app.token}; Path=/; HttpOnly; SameSite=Strict")
-            self.end_headers(); self.wfile.write(payload); return
-        self.send_error(404)
-    def do_POST(self) -> None:
-        if not self.valid_host(): self.send_error(HTTPStatus.MISDIRECTED_REQUEST); return
-        if not self.authorized(): self.send_json({"error": "invalid local token"}, 403); return
-        path = urlparse(self.path).path
-        if path not in HTTP_WRITE_ROUTES: self.send_error(404); return
-        try:
-            declared = int(self.headers.get("Content-Length", "0"))
-            maximum = MAX_CHAT_IMAGE_BYTES * MAX_CHAT_IMAGES * 2 if path == "/api/chat-send" else 16384
-            if declared > maximum:
-                self.send_json({"error": "request body exceeds the local Chat Room limit"}, 413); return
-            body = json.loads(self.rfile.read(declared) or b"{}")
-            with RoomStore(self.app.data_dir) as store:
-                if path == "/api/session-start":
-                    value = start_session(self.app.data_dir, self.app.repo, str(body.get("client") or ""), str(body.get("worktree") or ""), str(body.get("prompt") or ""))
-                elif path == "/api/session-stop":
-                    value = stop_delivery(str(body.get("client") or ""), str(body.get("session_id") or ""))
-                elif path == "/api/chat-send":
-                    attachments = body.get("attachments") if isinstance(body.get("attachments"), list) else []
-                    value = start_chat_delivery(self.app.data_dir, self.app.repo, str(body.get("client") or ""), str(body.get("session_id") or ""), str(body.get("message") or ""), store.members(self.app.repo.room_id), [item for item in attachments if isinstance(item, dict)])
-                elif path == "/api/rename":
-                    value = store.rename(self.app.repo, str(body.get("kind") or ""), str(body.get("reference") or ""), str(body.get("label") or ""), str(body.get("client") or ""))
-                elif path == "/api/threads":
-                    source = "temporary-channel" if str(body.get("lifetime") or "durable") == "temporary" else "team-channel"
-                    value = store.open_thread(self.app.repo, str(body.get("title") or ""), str(body.get("reason") or "coordination"), "@human", [str(x) for x in body.get("participants", [])], [str(x) for x in body.get("paths", [])], source, metadata={"audience": str(body.get("audience") or "agents"), "origin": str(body.get("origin") or "human")})
-                elif path == "/api/thread-close":
-                    value = store.close_thread(self.app.repo, str(body.get("thread_id") or ""))
-                elif body.get("thread_id"):
-                    value = store.post_thread(self.app.repo, str(body["thread_id"]), "@human", str(body.get("message") or ""))
-                else:
-                    value = store.post(self.app.repo, "@human", str(body.get("kind") or "message"), str(body.get("topic") or "general"), "posted", str(body.get("message") or ""), [str(x) for x in body.get("recipients", [])])
-            self.send_json(value, 202 if path in ("/api/chat-send", "/api/session-start") else 201)
-            self.app.event_hub.publish("workspace.changed", {"path": path})
-        except (RoomError, ValueError, json.JSONDecodeError) as error: self.send_json({"error": str(error)}, 400)
-
-
-class EventHub:
-    def __init__(self) -> None:
-        self.lock = threading.Lock(); self.subscribers: Set[queue.Queue[Dict[str, Any]]] = set(); self.sequence = 0
-
-    def subscribe(self) -> queue.Queue[Dict[str, Any]]:
-        receiver: queue.Queue[Dict[str, Any]] = queue.Queue(maxsize=32)
-        with self.lock: self.subscribers.add(receiver)
-        return receiver
-
-    def unsubscribe(self, receiver: queue.Queue[Dict[str, Any]]) -> None:
-        with self.lock: self.subscribers.discard(receiver)
-
-    def publish(self, event_type: str, data: Optional[Dict[str, Any]] = None) -> None:
-        with self.lock:
-            self.sequence += 1; event = {"type": event_type, "sequence": self.sequence, "timestamp": utc_now(), "data": data or {}}
-            subscribers = list(self.subscribers)
-        for receiver in subscribers:
-            try: receiver.put_nowait(event)
-            except queue.Full:
-                try: receiver.get_nowait(); receiver.put_nowait(event)
-                except (queue.Empty, queue.Full): pass
-
-
-class RoomEventServer:
-    def __init__(self, host: str, port: int, hostname: str, http_port: int, token: str, hub: EventHub) -> None:
-        self.host = host; self.port = port; self.hostname = hostname; self.http_port = http_port; self.token = token; self.hub = hub
-        self.ready = threading.Event(); self.thread: Optional[threading.Thread] = None; self.server: Any = None; self.error: Optional[Exception] = None
-
-    def start(self) -> None:
-        self.thread = threading.Thread(target=self._run, daemon=True, name="chat-room-events"); self.thread.start()
-        if not self.ready.wait(8): raise RoomError("timed out starting local WebSocket events")
-        if isinstance(self.error, ModuleNotFoundError):
-            raise RoomError(f"cannot start local WebSocket events: {self.error}. The browser room needs the pinned transport, so start it through the installed `chat-room` command rather than a bare interpreter.")
-        if self.error: raise RoomError(f"cannot start local WebSocket events: {self.error}")
-
-    def _run(self) -> None:
-        try:
-            from websockets.exceptions import ConnectionClosed
-            from websockets.sync.server import serve
-            origin = f"http://{self.hostname}:{self.http_port}"
-            def handler(connection: Any) -> None:
-                cookie = str(connection.request.headers.get("Cookie", "")) if connection.request else ""
-                if f"chat_room_token={self.token}" not in cookie.split("; "):
-                    connection.close(1008, "invalid local token"); return
-                receiver = self.hub.subscribe()
-                try:
-                    connection.send(json.dumps({"type": "connected", "sequence": 0, "timestamp": utc_now(), "data": {}}))
-                    while True:
-                        try: event = receiver.get(timeout=1.5)
-                        except queue.Empty: event = {"type": "sync", "sequence": 0, "timestamp": utc_now(), "data": {}}
-                        connection.send(json.dumps(event, separators=(",", ":")))
-                except (ConnectionClosed, OSError):
-                    pass
-                finally:
-                    self.hub.unsubscribe(receiver)
-            self.server = serve(handler, self.host, self.port, origins=[origin, None], compression="deflate", max_size=65536)
-            self.port = int(self.server.socket.getsockname()[1]); self.ready.set(); self.server.serve_forever()
-        except Exception as error:
-            self.error = error; self.ready.set()
-
-    def stop(self) -> None:
-        if self.server is not None: self.server.shutdown()
-        if self.thread is not None: self.thread.join(timeout=5)
-
-
-class RoomHTTPServer(ThreadingHTTPServer):
-    def __init__(self, address: Tuple[str, int], repo: Repository, data_dir: Path, static_dir: Path, token: str, hostname: str, events_port: int, event_hub: EventHub):
-        super().__init__(address, RoomHandler); self.repo = repo; self.data_dir = data_dir; self.static_dir = static_dir; self.token = token; self.hostname = hostname; self.events_port = events_port; self.event_hub = event_hub
-
-
-def running_room_url(port: int, hostname: str) -> Optional[str]:
-    url = f"http://{hostname}:{port}/"
-    request = Request(f"http://127.0.0.1:{port}/", headers={"Host": f"{hostname}:{port}"})
-    try:
-        with urlopen(request, timeout=.6) as response:
-            payload = response.read(4096)
-        return url if b"<title>Chat Room</title>" in payload else None
-    except (OSError, ValueError):
-        return None
-
-
-def run_ui(data_dir: Path, cwd: Optional[str], host: str, port: int, hostname: str, events_port: Optional[int], no_open: bool) -> int:
-    with RoomStore(data_dir) as store: repo = select_repository(store, cwd); store.register_room(repo)
-    if host not in ("127.0.0.1", "localhost", "::1"): raise RoomError("the UI binds only to loopback")
-    hostname = hostname.strip().lower().rstrip(".")
-    if hostname != "localhost" and not hostname.endswith(".localhost"): raise RoomError("the browser hostname must be localhost or end in .localhost")
-    token = hashlib.sha256(os.urandom(32)).hexdigest(); static_dir = Path(__file__).resolve().parents[1] / "assets"
-    hub = EventHub()
-    try:
-        provisional = RoomHTTPServer((host, port), repo, data_dir, static_dir, token, hostname, 0, hub)
-    except OSError as error:
-        if error.errno == errno.EADDRINUSE:
-            existing = running_room_url(port, hostname)
-            if existing:
-                print(f"Chat Room is already running\n{existing}")
-                if not no_open: webbrowser.open(existing)
-                return 0
-            raise RoomError(f"local port {port} is already used by another process; try: chat-room ui --port {port + 2} --events-port {port + 3}") from None
-        raise RoomError(f"could not start the local Chat Room UI: {error}") from None
-    http_port = int(provisional.server_address[1]); selected_events_port = int(events_port or (http_port + 1))
-    event_server = RoomEventServer(host, selected_events_port, hostname, http_port, token, hub)
-    try: event_server.start()
-    except Exception: provisional.server_close(); raise
-    provisional.events_port = event_server.port; server = provisional; url = f"http://{hostname}:{http_port}/"
-    print(f"Chat Room {repo.room_id}\n{url}\nEvents: ws://{hostname}:{event_server.port}/events\nPress Ctrl-C to stop.")
-    if not no_open: threading.Timer(.3, lambda: webbrowser.open(url)).start()
-    try: server.serve_forever()
-    except KeyboardInterrupt: pass
-    finally: server.server_close(); event_server.stop()
-    return 0
-
-
-def service_plist_path() -> Path:
-    return Path.home() / "Library" / "LaunchAgents" / "com.accountable.chat-room.plist"
-
-
-def service_path() -> str:
-    preferred = [str(Path(sys.executable).resolve().parent), str(Path.home() / ".local" / "bin"), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
-    preferred.extend(part for part in os.environ.get("PATH", "").split(os.pathsep) if part)
-    return os.pathsep.join(dict.fromkeys(preferred))
-
-
-def install_service(data_dir: Path, cwd: Optional[str], hostname: str, port: int, events_port: Optional[int]) -> Dict[str, Any]:
-    if sys.platform != "darwin":
-        raise RoomError("the durable user service currently supports macOS launchd")
-    repo = resolve_repository(cwd or os.getcwd())
-    if repo is None:
-        raise RoomError("service installation must reference a Git worktree")
-    hostname = hostname.strip().lower().rstrip(".")
-    if hostname != "localhost" and not hostname.endswith(".localhost"):
-        raise RoomError("the browser hostname must be localhost or end in .localhost")
-    data_dir.mkdir(parents=True, exist_ok=True)
-    plist_path = service_plist_path(); plist_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "Label": "com.accountable.chat-room",
-        "ProgramArguments": [sys.executable, str(Path(__file__).resolve()), "--data-dir", str(data_dir), "ui", "--cwd", str(repo.worktree), "--host", "127.0.0.1", "--port", str(port), "--events-port", str(events_port or (port + 1)), "--hostname", hostname, "--no-open"],
-        "EnvironmentVariables": {"PATH": service_path()},
-        "RunAtLoad": True, "KeepAlive": True,
-        "StandardOutPath": str(data_dir / "service.log"), "StandardErrorPath": str(data_dir / "service.log"),
-        "ProcessType": "Interactive",
-    }
-    temporary = plist_path.with_suffix(".plist.tmp")
-    with temporary.open("wb") as handle: plistlib.dump(payload, handle, sort_keys=True)
-    os.chmod(temporary, 0o600); temporary.replace(plist_path)
-    domain = f"gui/{os.getuid()}"
-    subprocess.run(["launchctl", "bootout", domain, str(plist_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-    result = subprocess.run(["launchctl", "bootstrap", domain, str(plist_path)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-    if result.returncode != 0:
-        raise RoomError((result.stderr or result.stdout).strip() or "launchd refused the Chat Room service")
-    return {"status": "installed", "url": f"http://{hostname}:{port}/", "events_url": f"ws://{hostname}:{events_port or (port + 1)}/events", "project": repo.project_identity, "plist": str(plist_path)}
-
-
-def service_status() -> Dict[str, Any]:
-    plist_path = service_plist_path(); domain = f"gui/{os.getuid()}/com.accountable.chat-room"
-    result = subprocess.run(["launchctl", "print", domain], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False) if sys.platform == "darwin" else None
-    return {"installed": plist_path.exists(), "running": bool(result and result.returncode == 0), "plist": str(plist_path)}
-
-
-def uninstall_service() -> Dict[str, Any]:
-    plist_path = service_plist_path()
-    if sys.platform == "darwin":
-        subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-    if plist_path.exists(): plist_path.unlink()
-    return {"status": "uninstalled", "plist": str(plist_path)}
-
-
 def run_codex(data_dir: Path, arguments: Sequence[str]) -> int:
     executable = find_cli_executable("codex")
     if not executable: raise RoomError("codex executable is not available")
@@ -1854,9 +1529,9 @@ def diagnose(data_dir: Path, repair: bool = False) -> Dict[str, Any]:
         findings.append({"severity": "warning", "detail": f"pid {process['pid']} has been running {process['uptime']} and holds whatever code it started with; if it predates this build it can still write an older shape. Restart it after upgrading."})
     reported = str(report["launcher"]["version"] or "")
     if report["launcher"].get("predates_version_flag"):
-        findings.append({"severity": "warning", "detail": f"the installed launcher at {report['launcher']['path']} predates --version, so it is older than {VERSION}; hooks and the browser room are running different code. Reinstall it from this checkout."})
+        findings.append({"severity": "warning", "detail": f"the installed launcher at {report['launcher']['path']} predates --version, so it is older than {VERSION}; hooks and the command line are running different code. Reinstall it from this checkout."})
     elif reported and VERSION not in reported:
-        findings.append({"severity": "warning", "detail": f"the installed launcher reports {reported!r} while this copy is {VERSION}; hooks and the browser room may be running different code"})
+        findings.append({"severity": "warning", "detail": f"the installed launcher reports {reported!r} while this copy is {VERSION}; hooks and the command line may be running different code"})
     if not database.exists():
         report["installed_schema"] = None
         findings.append({"severity": "info", "detail": "no room database yet; it is created on first use"})
@@ -2020,14 +1695,15 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--version", action="version", version=f"{PLUGIN_NAME} {VERSION} (schema {SCHEMA_VERSION})")
     sub = value.add_subparsers(dest="command", required=True)
     doctor = sub.add_parser("doctor"); doctor.add_argument("--cwd"); doctor.add_argument("--repair", action="store_true")
-    for name in ("status", "targets", "members", "threads", "options", "read", "chat", "ui"):
+    for name in ("status", "targets", "members", "threads", "options", "read", "chat", "alerts", "chats"):
         command = sub.add_parser(name); command.add_argument("--cwd")
         if name == "read": command.add_argument("--after-id", type=int, default=0); command.add_argument("--limit", type=int, default=50)
         if name == "chat": command.add_argument("--sender", default="@human")
-        if name == "ui": command.add_argument("--host", default="127.0.0.1"); command.add_argument("--port", type=int, default=7391); command.add_argument("--events-port", type=int); command.add_argument("--hostname", default="chatroom.localhost"); command.add_argument("--no-open", action="store_true")
     post = sub.add_parser("post"); post.add_argument("--cwd"); post.add_argument("--sender", default="@human"); post.add_argument("--kind", choices=MESSAGE_KINDS, default="message"); post.add_argument("--topic", default="general"); post.add_argument("--status", default="posted"); post.add_argument("--recipient", action="append", default=[]); post.add_argument("--message", required=True)
     start = sub.add_parser("start"); start.add_argument("--cwd"); start.add_argument("--client", choices=("claude", "codex"), required=True); start.add_argument("--worktree"); start.add_argument("--prompt", required=True)
     stop = sub.add_parser("stop"); stop.add_argument("--cwd"); stop.add_argument("--client", choices=("claude", "codex"), required=True); stop.add_argument("--session", required=True)
+    send = sub.add_parser("send"); send.add_argument("--cwd"); send.add_argument("--client", choices=("claude", "codex"), required=True); send.add_argument("--session", required=True); send.add_argument("--message", default=""); send.add_argument("--image", action="append", default=[])
+    rename = sub.add_parser("rename"); rename.add_argument("--cwd"); rename.add_argument("--kind", choices=("room", "channel", "chat"), required=True); rename.add_argument("--reference", default=""); rename.add_argument("--label", required=True); rename.add_argument("--client", default="")
     search = sub.add_parser("search"); search.add_argument("--cwd"); search.add_argument("--query", required=True); search.add_argument("--limit", type=int, default=100); search.add_argument("--scope", choices=("room", "chats"), default="room")
     index = sub.add_parser("index"); index.add_argument("--cwd")
     ready = sub.add_parser("ready"); ready.add_argument("--cwd"); ready.add_argument("--into")
@@ -2037,9 +1713,6 @@ def parser() -> argparse.ArgumentParser:
     thread_open = sub.add_parser("thread-open"); thread_open.add_argument("--cwd"); thread_open.add_argument("--title", required=True); thread_open.add_argument("--reason", default="coordination"); thread_open.add_argument("--audience", choices=("agents", "human-loop"), default="agents"); thread_open.add_argument("--origin", default="human"); thread_open.add_argument("--lifetime", choices=("durable", "temporary"), default="durable"); thread_open.add_argument("--participant", action="append", default=[]); thread_open.add_argument("--path", action="append", default=[])
     thread_close = sub.add_parser("thread-close"); thread_close.add_argument("--cwd"); thread_close.add_argument("--thread", required=True)
     option_set = sub.add_parser("option-set"); option_set.add_argument("--cwd"); option_set.add_argument("--namespace", required=True); option_set.add_argument("--key", required=True); option_set.add_argument("--value", required=True); option_set.add_argument("--metadata", default="{}")
-    service = sub.add_parser("service"); service_actions = service.add_subparsers(dest="service_action", required=True)
-    service_install = service_actions.add_parser("install"); service_install.add_argument("--cwd"); service_install.add_argument("--hostname", default="chatroom.localhost"); service_install.add_argument("--port", type=int, default=7391); service_install.add_argument("--events-port", type=int)
-    service_actions.add_parser("status"); service_actions.add_parser("uninstall")
     sub.add_parser("hook"); sub.add_parser("mcp")
     codex = sub.add_parser("codex"); codex.add_argument("args", nargs=argparse.REMAINDER)
     return value
@@ -2055,15 +1728,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "hook": return run_hook(args.data_dir)
         if args.command == "mcp": return run_mcp(args.data_dir)
         if args.command == "codex": return run_codex(args.data_dir, args.args)
-        if args.command == "ui": return run_ui(args.data_dir, args.cwd, args.host, args.port, args.hostname, args.events_port, args.no_open)
-        if args.command == "service":
-            if args.service_action == "install": value = install_service(args.data_dir, args.cwd, args.hostname, args.port, args.events_port)
-            elif args.service_action == "status": value = service_status()
-            else: value = uninstall_service()
-            print(json.dumps(value, indent=2, sort_keys=True)); return 0
         with RoomStore(args.data_dir) as store:
             repo = select_repository(store, getattr(args, "cwd", None))
-            if args.command == "status": value = store.status(repo)
+            if args.command == "status":
+                value = store.status(repo)
+                value["display_name"] = store.display_name("room_name", repo.room_id, repo.worktree.name or "Chat Room")
             elif args.command == "targets": value = store.targets(repo)
             elif args.command == "members": value = {"room_id": repo.room_id, "members": store.members(repo.room_id)}
             elif args.command == "threads": value = {"room_id": repo.room_id, "threads": store.sync_preemptive_conflicts(repo)}
@@ -2072,6 +1741,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             elif args.command == "identify": value = store.claim_handle(repo, args.session, args.handle)
             elif args.command == "start": value = start_session(args.data_dir, repo, args.client, args.worktree, args.prompt)
             elif args.command == "stop": value = stop_delivery(args.client, args.session)
+            elif args.command == "send": value = start_chat_delivery(args.data_dir, repo, args.client, args.session, args.message, store.members(repo.room_id), chat_images(args.image))
+            elif args.command == "rename": value = store.rename(repo, args.kind, args.reference, args.label, args.client)
+            elif args.command == "alerts": value = {"room_id": repo.room_id, "alerts": coordination_alerts(store.targets(repo), store.sync_preemptive_conflicts(repo))}
+            elif args.command == "chats":
+                chats, _files = discover_chat_catalog(repo)
+                for chat in chats: chat["title"] = store.display_name("chat_name", f"{chat['client']}-{chat['id']}", str(chat["title"]))
+                value = {"room_id": repo.room_id, "chats": chats}
             elif args.command == "index": value = run_index(args.data_dir, repo)
             elif args.command == "ready": value = store.merge_readiness(repo, args.into)
             elif args.command == "projects": value = store.projects(repo)
