@@ -18,7 +18,7 @@
     "react-dom": "^19.2.8"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.51.0",
+    "@cloudflare/vite-plugin": "^1.54.7",
     "@tailwindcss/postcss": "4.3.3",
     "@types/node": "26.1.2",
     "@types/react": "19.2.18",
@@ -32,7 +32,7 @@
     "typescript": "5.9.3",
     "vinext": "0.2.1",
     "vite": "^8.2.1",
-    "wrangler": "^4.119.0"
+    "wrangler": "^4.131.0"
   },
   "overrides": {
     "undici": "7.29.0"
